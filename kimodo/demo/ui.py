@@ -81,6 +81,18 @@ def create_gui(
             return None
         return demo.client_sessions[event_client.client_id]
 
+    def _get_download_format_options(*, is_g1: bool) -> list[str]:
+        options = ["NPZ", "BVH"]
+        if is_g1:
+            options.append("CSV")
+        return options
+
+    def _update_download_format_options(dropdown: viser.GuiInputHandle, *, is_g1: bool) -> None:
+        options = _get_download_format_options(is_g1=is_g1)
+        current_value = str(dropdown.value).upper() if dropdown.value is not None else "NPZ"
+        dropdown.options = options
+        dropdown.value = current_value if current_value in options else "NPZ"
+
     def build_timeline_tracks():
         timeline = client.timeline
         demo.set_timeline_defaults(timeline, model_fps)
@@ -1142,7 +1154,7 @@ def create_gui(
                 )
                 gui_download_format_dropdown = client.gui.add_dropdown(
                     "Format",
-                    options=["NPZ", "BVH"],
+                    options=_get_download_format_options(is_g1="g1" in model_name),
                     initial_value="NPZ",
                 )
                 gui_download_button = client.gui.add_button(
@@ -1212,6 +1224,27 @@ def create_gui(
                 np.savez(buf, **motion_data)
                 return buf.getvalue()
 
+            def _motion_to_csv_bytes(motion, skeleton) -> bytes:
+                import io
+
+                from kimodo.exports.mujoco import MujocoQposConverter
+
+                if not isinstance(skeleton, G1Skeleton34):
+                    raise ValueError("CSV export is only supported for the G1 skeleton.")
+
+                converter = MujocoQposConverter(skeleton)
+                qpos = converter.dict_to_qpos(
+                    {
+                        "local_rot_mats": motion.joints_local_rot.detach().cpu(),
+                        "root_positions": motion.joints_pos[:, skeleton.root_idx, :].detach().cpu(),
+                    },
+                    numpy=True,
+                )
+
+                buf = io.StringIO()
+                np.savetxt(buf, qpos, delimiter=",")
+                return buf.getvalue().encode("utf-8")
+
             def _coerce_download_filename(raw_name: str, *, ext: str) -> str:
                 """Coerce a user-entered filename to a safe basename with the desired extension.
 
@@ -1227,7 +1260,7 @@ def create_gui(
                 if name == "":
                     return f"output{ext}"
 
-                known_exts = (".npz", ".bvh", ".png", ".mp4")
+                known_exts = (".npz", ".bvh", ".csv", ".png", ".mp4")
                 lower = name.lower()
                 if lower.endswith(known_exts):
                     return os.path.splitext(name)[0] + ext
@@ -1419,6 +1452,10 @@ def create_gui(
                             fps=float(session.model_fps),
                         )
                         mime = "text/plain"
+                    elif fmt == "CSV":
+                        filename = _coerce_download_filename(raw_name, ext=".csv")
+                        payload = _motion_to_csv_bytes(motion, session.skeleton)
+                        mime = "text/csv"
                     else:
                         # Default to NPZ (most common and matches existing save/load).
                         filename = _coerce_download_filename(raw_name, ext=".npz")
@@ -1645,6 +1682,7 @@ def create_gui(
                 return
             gui_use_soma_layer_checkbox.visible = "soma" in loaded_model_name
             _is_g1 = "g1" in loaded_model_name
+            _update_download_format_options(gui_download_format_dropdown, is_g1=_is_g1)
             gui_real_robot_rotations_checkbox.visible = _is_g1
             gui_postprocess_checkbox.visible = not _is_g1
             gui_root_margin.visible = not _is_g1 and gui_postprocess_checkbox.value
@@ -3035,6 +3073,8 @@ def create_gui(
             prev_frame_callback(session)
         elif event.key == "ArrowRight":
             next_frame_callback(session)
+
+    _update_visibility_for_loaded_model(model_name)
 
     gui_elements = GuiElements(
         gui_play_pause_button=gui_play_pause_button,
