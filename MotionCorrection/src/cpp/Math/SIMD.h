@@ -6,7 +6,18 @@
 #pragma once
 
 #include <stdint.h>
-#include <immintrin.h>
+#ifdef __APPLE__
+	#define SIMDE_ENABLE_NATIVE_ALIASES
+    #include <simde/x86/mmx.h>
+    #include <simde/x86/sse.h>
+    #include <simde/x86/sse2.h>
+    #include <simde/x86/sse3.h>
+    #include <simde/x86/ssse3.h>
+    #include <simde/x86/sse4.1.h>
+    #include <simde/x86/avx.h>
+#else
+	#include <immintrin.h>
+#endif
 
 namespace SIMD
 {

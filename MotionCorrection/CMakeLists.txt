@@ -7,6 +7,11 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # Find Python
 find_package(Python3 COMPONENTS Interpreter Development REQUIRED)
 
+if(APPLE)
+	include_directories(/opt/homebrew/include/)
+endif()
+
+
 # Find or fetch pybind11
 find_package(pybind11 CONFIG QUIET)
 if(NOT pybind11_FOUND)
@@ -73,6 +78,9 @@ target_compile_definitions(motion_correction_cpp_base PUBLIC EIGEN_MPL2_ONLY)
 if(MSVC)
     # MSVC-specific flags
     target_compile_options(motion_correction_cpp_base PRIVATE /W4 /arch:AVX)
+elseif(APPLE)
+	target_compile_options(motion_correction_cpp_base PRIVATE -Wall -Wextra -O3)
+
 else()
     # GCC/Clang flags (also applies to MinGW on Windows)
     # Enable SSE4.1 and AVX instructions for SIMD operations
