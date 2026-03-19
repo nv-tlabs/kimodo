@@ -6,7 +6,7 @@
 #pragma once
 
 #include <stdint.h>
-#ifdef __APPLE__
+#if defined(__aarch64__) || defined(__ARM_NEON)
 	#define SIMDE_ENABLE_NATIVE_ALIASES
     #include <simde/x86/mmx.h>
     #include <simde/x86/sse.h>
