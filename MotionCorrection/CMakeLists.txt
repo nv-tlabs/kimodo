@@ -88,7 +88,7 @@ target_compile_definitions(motion_correction_cpp_base PUBLIC EIGEN_MPL2_ONLY)
 if(MSVC)
     # MSVC-specific flags
     target_compile_options(motion_correction_cpp_base PRIVATE /W4 /arch:AVX)
-elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64|i[3-6]86)$")
+elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64|ARM64)")
     # ARM64/NEON flags
 	target_compile_options(motion_correction_cpp_base PRIVATE -Wall -Wextra -O3)
 
