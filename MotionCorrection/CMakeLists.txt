@@ -7,6 +7,17 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # Find Python
 find_package(Python3 COMPONENTS Interpreter Development REQUIRED)
 
+# Find brew package
+find_path(SIMDE_INCLUDE_DIR
+    NAMES simde/x86/sse.h
+)
+
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64|ARM64)")
+    if(NOT SIMDE_INCLUDE_DIR)
+        message(FATAL_ERROR "SIMDe headers not found. Please install simde or set CMAKE_PREFIX_PATH.")
+    endif()
+endif()
+
 # Find or fetch pybind11
 find_package(pybind11 CONFIG QUIET)
 if(NOT pybind11_FOUND)
@@ -61,6 +72,10 @@ target_include_directories(motion_correction_cpp_base PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/src/cpp
 )
 
+if(SIMDE_INCLUDE_DIR)
+    target_include_directories(motion_correction_cpp_base PUBLIC ${SIMDE_INCLUDE_DIR})
+endif()
+
 if(TARGET Eigen3::Eigen)
     target_link_libraries(motion_correction_cpp_base PUBLIC Eigen3::Eigen)
 else()
@@ -73,6 +88,10 @@ target_compile_definitions(motion_correction_cpp_base PUBLIC EIGEN_MPL2_ONLY)
 if(MSVC)
     # MSVC-specific flags
     target_compile_options(motion_correction_cpp_base PRIVATE /W4 /arch:AVX)
+elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64|ARM64)")
+    # ARM64/NEON flags
+	target_compile_options(motion_correction_cpp_base PRIVATE -Wall -Wextra -O3)
+
 else()
     # GCC/Clang flags (also applies to MinGW on Windows)
     # Enable SSE4.1 and AVX instructions for SIMD operations
