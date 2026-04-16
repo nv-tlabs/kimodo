@@ -9,6 +9,39 @@ import torch
 
 from .llm2vec import LLM2Vec
 
+# KIMODO_QUANTIZE options:
+#   "4bit"  - NF4 4-bit quantization (~5GB VRAM for Llama-3-8B)
+#   "8bit"  - INT8 8-bit quantization (~9GB VRAM for Llama-3-8B)
+#   unset   - no quantization, full precision (~17GB VRAM)
+QUANTIZE_PRESETS = {
+    "4bit": {
+        "load_in_4bit": True,
+        "bnb_4bit_compute_dtype": "float16",
+        "bnb_4bit_quant_type": "nf4",
+        "bnb_4bit_use_double_quant": True,
+    },
+    "8bit": {
+        "load_in_8bit": True,
+    },
+}
+
+
+def _build_quantization_config():
+    """Build BitsAndBytes quantization config from KIMODO_QUANTIZE env var."""
+    quantize = os.environ.get("KIMODO_QUANTIZE", "").lower()
+    if not quantize:
+        return None
+    if quantize not in QUANTIZE_PRESETS:
+        available = ", ".join(sorted(QUANTIZE_PRESETS))
+        raise ValueError(
+            f"Unknown KIMODO_QUANTIZE='{quantize}'. Available: {available}"
+        )
+    from transformers import BitsAndBytesConfig
+    kwargs = QUANTIZE_PRESETS[quantize].copy()
+    if "bnb_4bit_compute_dtype" in kwargs:
+        kwargs["bnb_4bit_compute_dtype"] = getattr(torch, kwargs["bnb_4bit_compute_dtype"])
+    return BitsAndBytesConfig(**kwargs)
+
 
 class LLM2VecEncoder:
     """LLM2Vec text embeddings."""
@@ -30,11 +63,20 @@ class LLM2VecEncoder:
             base_model_name_or_path = os.path.join(os.environ["TEXT_ENCODERS_DIR"], base_model_name_or_path)
             peft_model_name_or_path = os.path.join(os.environ["TEXT_ENCODERS_DIR"], peft_model_name_or_path)
 
+        extra_kwargs = {}
+        quantization_config = _build_quantization_config()
+        if quantization_config is not None:
+            extra_kwargs["quantization_config"] = quantization_config
+            extra_kwargs["device_map"] = "auto"
+            mode = os.environ.get("KIMODO_QUANTIZE", "").lower()
+            print(f"[Kimodo] Using {mode} quantization for text encoder to reduce VRAM usage")
+
         self.model = LLM2Vec.from_pretrained(
             base_model_name_or_path=base_model_name_or_path,
             peft_model_name_or_path=peft_model_name_or_path,
             torch_dtype=torch_dtype,
             cache_dir=cache_dir,
+            **extra_kwargs,
         )
         if device is not None:
             if device == "auto":
@@ -43,9 +85,11 @@ class LLM2VecEncoder:
         self.model.eval()
         for p in self.model.parameters():
             p.requires_grad = False
+        self._quantized = quantization_config is not None
 
     def to(self, device: torch.device):
-        self.model = self.model.to(device)
+        if not self._quantized:
+            self.model = self.model.to(device)
         return self
 
     def eval(self):

@@ -87,6 +87,12 @@ class LLM2Vec(nn.Module):
         self.max_length = max_length
         self.doc_max_length = doc_max_length
         self.config = model.config
+        self._is_quantized = getattr(model, "is_quantized", False) or hasattr(model, "quantization_method")
+
+    def to(self, *args, **kwargs):
+        if self._is_quantized:
+            return self
+        return super().to(*args, **kwargs)
 
     @classmethod
     def _get_model_class(cls, config_class_name, enable_bidirectional):
