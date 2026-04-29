@@ -170,12 +170,13 @@ class LLM2Vec(nn.Module):
         return cls(model=model, tokenizer=tokenizer, **config)
 
     def prepare_for_tokenization(self, text):
-        if self.model.config._name_or_path == "meta-llama/Meta-Llama-3-8B-Instruct":
+        if self.model.config._name_or_path == "unsloth/llama-3-8b-Instruct": # INITIALLY WAS meta-llama/Meta-Llama-3-8B-Instruct
             text = "<|start_header_id|>user<|end_header_id|>\n\n" + text.strip() + "<|eot_id|>"
             return text
         if self.model.config._name_or_path in [
-            "mistralai/Mistral-7B-Instruct-v0.2",
-            "meta-llama/Llama-2-7b-chat-hf",
+            "meta-llama/Meta-Llama-3-8B-Instruct",
+            "unsloth/llama-3-8b-Instruct",
+            "/workspace/kimodo/models/llm2vec-mntp",
         ]:
             text = "[INST] " + text.strip() + " [/INST]"
         if self.model.config._name_or_path in [
@@ -188,7 +189,11 @@ class LLM2Vec(nn.Module):
         ]:
             text = "<|im_start|>user\n" + text.strip() + "<|im_end|>"
         if self.pooling_mode == "eos_token":
-            if self.model.config._name_or_path == "meta-llama/Meta-Llama-3-8B":
+            if self.model.config._name_or_path in [
+                "meta-llama/Meta-Llama-3-8B-Instruct",
+                "unsloth/llama-3-8b-Instruct",
+                "/workspace/kimodo/models/llm2vec-mntp",
+            ]:
                 text = text.strip() + "<|end_of_text|>"
             elif isinstance(self.model.config, LlamaConfig) or isinstance(self.model.config, MistralConfig):
                 text = text.strip() + " </s>"
