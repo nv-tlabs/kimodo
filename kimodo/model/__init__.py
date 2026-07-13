@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Kimodo model package: main model class, text encoders, and loading utilities."""
 
+from .auto_embedding_encoder import AutoEmbeddingEncoder
 from .common import resolve_target
 from .kimodo_model import Kimodo
 from .llm2vec import LLM2VecEncoder
@@ -17,6 +18,7 @@ from .tmr import TMR
 from .twostage_denoiser import TwostageDenoiser
 
 __all__ = [
+    "AutoEmbeddingEncoder",
     "Kimodo",
     "LLM2VecEncoder",
     "TMR",

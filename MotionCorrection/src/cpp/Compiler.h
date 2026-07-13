@@ -20,6 +20,6 @@
 
 #if defined(COMPILER_MSVC)
 	#define FORCE_INLINE __forceinline
-#elif defined(COMPILER_GNUC)
+#elif defined(COMPILER_GNUC) || defined(COMPILER_CLANG)
 	#define FORCE_INLINE inline __attribute__((always_inline))
 #endif
