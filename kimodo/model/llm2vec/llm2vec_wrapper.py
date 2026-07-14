@@ -93,3 +93,46 @@ class LLM2VecEncoder:
 
         encoded_text = torch.tensor(encoded_text).to(self._device)
         return encoded_text, lengths
+
+
+class DummyTextEncoder:
+    """Zero-vector text encoder for constraint-only generation without LLM weights.
+
+    Activated by setting TEXT_ENCODER_MODE=dummy. Returns zero embeddings
+    of the correct shape (llm_dim=4096), which the model treats as
+    unconditional (same as empty-text in classifier-free guidance training).
+
+    This allows running Kimodo on GPUs with <17GB VRAM and without
+    Llama-3 access, using only kinematic constraints for motion control.
+    """
+
+    def __init__(self, llm_dim: int = 4096, device: str = "cuda:0") -> None:
+        self.llm_dim = llm_dim
+        self._device = torch.device(device)
+        print(f"[Kimodo] Using DummyTextEncoder (zero embeddings, dim={llm_dim})")
+        print("[Kimodo] Text prompts will be ignored. Use constraints for motion control.")
+
+    def to(self, device: torch.device):
+        self._device = torch.device(device)
+        return self
+
+    def eval(self):
+        return self
+
+    def get_device(self):
+        return self._device
+
+    def __call__(self, text: list[str] | str):
+        is_string = False
+        if isinstance(text, str):
+            text = [text]
+            is_string = True
+
+        encoded_text = torch.zeros(len(text), 1, self.llm_dim, device=self._device)
+        lengths = np.ones(len(text), dtype=int).tolist()
+
+        if is_string:
+            encoded_text = encoded_text[0]
+            lengths = lengths[0]
+
+        return encoded_text, lengths
