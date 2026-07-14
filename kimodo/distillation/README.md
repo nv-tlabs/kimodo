@@ -37,3 +37,44 @@ RESUME_PATH=outputs/g1_distill_16to8_100to20/checkpoints/step_00002000.pt \
 - `distillation.student_steps=20` controls the timestep grid used during distillation.
 - `distillation.teacher_steps=100` is metadata for experiment tracking; teacher itself remains full-capacity pretrained.
 - Student warm start from teacher is enabled via same-name same-shape parameter copy.
+
+## Two-stage Training
+
+### Stage 1: Offline Distillation
+
+配置：`kimodo/distillation/configs/distill_g1_100_to_20_schedule.yaml`
+
+从固定 motion 数据集构造加噪状态，使用 Teacher 输出和数据集 GT 共同监督 Student。训练
+10,000 step，最终生成：
+
+```text
+outputs/g1_distill_16to8_100to20_schedule/ema_final.pt
+```
+
+两卡启动示例（`batch_size=64` 是单卡 batch，global batch 为 128）：
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1 \
+torchrun --standalone --nproc_per_node=2 \
+  -m kimodo.distillation.train \
+  --config kimodo/distillation/configs/distill_g1_100_to_20_schedule.yaml
+```
+
+### Stage 2: DAgger Distillation
+
+配置：`kimodo/distillation/configs/distill_g1_100_to_20_dagger_teacher_gt03_100k_bs4x4_k3_cosine_selfacc50_rootacc10_headingacc10.yaml`
+
+从 Stage 1 的 `ema_final.pt` 初始化 Student。Student 执行 20-step rollout，每条 rollout
+抽取 3 个访问状态，由 Teacher 重新标注，再结合 GT 和 acceleration loss 训练 100,000 step。
+
+四卡启动示例：
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1,2,3 \
+torchrun --standalone --nproc_per_node=4 \
+  scripts/train_distill_g1_100_to_20_dagger_teacher_gt_selfacc.py \
+  --config kimodo/distillation/configs/distill_g1_100_to_20_dagger_teacher_gt03_100k_bs4x4_k3_cosine_selfacc50_rootacc10_headingacc10.yaml
+```
+
+DAgger 必须使用专用脚本 `train_distill_g1_100_to_20_dagger_teacher_gt_selfacc.py`；基础
+`kimodo.distillation.train` 不会执行 Student rollout。
