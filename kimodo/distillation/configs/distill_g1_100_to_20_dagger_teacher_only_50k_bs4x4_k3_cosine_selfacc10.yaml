@@ -1,0 +1,170 @@
+model:
+  num_base_steps: 1000
+
+  teacher_denoiser:
+    _target_: kimodo.model.twostage_denoiser.TwostageDenoiser
+    motion_mask_mode: concat
+    ckpt_path: ./huggingface/hub/models--nvidia--Kimodo-G1-RP-v1/snapshots/3020ad8c419c244e0429d360163730c63c4ed011/model.safetensors
+    motion_rep:
+      _target_: kimodo.motion_rep.KimodoMotionRep
+      fps: 30
+      stats_path: ./huggingface/hub/models--nvidia--Kimodo-G1-RP-v1/snapshots/3020ad8c419c244e0429d360163730c63c4ed011/stats/motion
+      skeleton:
+        _target_: kimodo.skeleton.G1Skeleton34
+    llm_shape: [1, 4096]
+    use_text_mask: false
+    latent_dim: 1024
+    ff_size: 2048
+    num_layers: 16
+    num_heads: 8
+    activation: gelu
+    dropout: 0.0
+    pe_dropout: 0.0
+    norm_first: false
+    num_text_tokens_override: 50
+    input_first_heading_angle: true
+
+  student_denoiser:
+    _target_: kimodo.model.twostage_denoiser.TwostageDenoiser
+    motion_mask_mode: concat
+    ckpt_path: null
+    motion_rep:
+      _target_: kimodo.motion_rep.KimodoMotionRep
+      fps: 30
+      stats_path: ./huggingface/hub/models--nvidia--Kimodo-G1-RP-v1/snapshots/3020ad8c419c244e0429d360163730c63c4ed011/stats/motion
+      skeleton:
+        _target_: kimodo.skeleton.G1Skeleton34
+    llm_shape: [1, 4096]
+    use_text_mask: false
+    latent_dim: 1024
+    ff_size: 2048
+    num_layers: 8
+    num_heads: 8
+    activation: gelu
+    dropout: 0.0
+    pe_dropout: 0.0
+    norm_first: false
+    num_text_tokens_override: 50
+    input_first_heading_angle: true
+
+text_encoder:
+  _target_: kimodo.model.LLM2VecEncoder
+  base_model_name_or_path: ./huggingface/hub/models--McGill-NLP--LLM2Vec-Meta-Llama-3-8B-Instruct-mntp/snapshots/31474e395ada192e8ed1586db6be79fb3b70c9c0
+  peft_model_name_or_path: ./huggingface/hub/models--McGill-NLP--LLM2Vec-Meta-Llama-3-8B-Instruct-mntp-supervised/snapshots/baa8ebf04a1c2500e61288e7dad65e8ae42601a7
+  dtype: bfloat16
+  llm_dim: 4096
+
+data:
+  num_workers: 0
+  pin_memory: true
+  dataset:
+    _target_: kimodo.training.dataset.G1CSVTextDataset
+    csv_root: /pfs/pfs-ilWc5D/yzh/g1_soma/csv
+    timelines_path: ./huggingface/timelines.jsonl
+    max_frames: 300
+    to_normalize: true
+    random_crop: true
+    rotate_to_zero_prob: 0.0
+    randomize_first_heading_prob: 1.0
+    translate_to_zero_prob: 1.0
+    text_mode: overview
+    source_coord_system: mujoco
+    root_euler_order: xyz
+    root_angle_unit: degrees
+    joint_angle_unit: degrees
+    root_position_unit: centimeters
+    root_position_scale: 1.0
+    input_fps: 120
+    skip_bad_samples: true
+    max_bad_sample_retries: 16
+    phase2_enabled: true
+    phase2_num_keyframes: 20
+    phase2_constraint_mode: mixed
+    phase2_constraint_policy: paper
+    phase2_fullbody_prob: 0.5
+    phase2_include_first: true
+    phase2_include_last: true
+    phase2_condition_normalized: true
+    phase2_return_constraints: false
+    phase2_no_constraint_prob: 0.1
+    phase2_mix_two_patterns_prob: 0.0
+    phase2_bias_towards_fewer_keyframes: false
+    phase2_dense_path_stride: 1
+    phase2_end_effector_joint_pool: [LeftHand, RightHand, LeftFoot, RightFoot]
+    phase2_pattern_weights:
+      fullbody_sparse: 0.0
+      endeffector_sparse: 1.0
+      root2d_sparse: 0.0
+      root2d_dense: 0.0
+      foot_contacts_sparse: 0.0
+
+loss:
+  teacher_weight: 1.0
+  gt_weight: 0.0
+  self_acc_weight: 1.0
+  weight_schedule:
+    enabled: false
+  teacher_gammas: [10.0, 2.0, 10.0, 3.0, 10.0, 4.0, 5.0]
+  gt_gammas: [10.0, 2.0, 10.0, 3.0, 10.0, 4.0, 5.0]
+
+distillation:
+  teacher_steps: 100
+  student_steps: 20
+  student_init_from_teacher: false
+  student_init_mode: teacher_layer_map
+  teacher_layer_indices_for_student: [0, 2, 4, 6, 8, 10, 12, 14]
+
+dagger:
+  initial_student_ckpt: ./outputs/g1_distill_16to8_100to20_schedule/ema_final.pt
+  samples_per_rollout: 3
+  include_t0: true
+
+phase2:
+  enabled: true
+  start_step: 0
+  end_step: 0
+  start_keyframes: 20
+  end_keyframes: 20
+
+training:
+  seed: 42
+  deterministic: false
+  output_dir: ./outputs/g1_distill_16to8_100to20_dagger_teacher_only_50k_bs4x4_k3_cosine_selfacc10
+
+  resume: null
+  total_steps: 50000
+  # Rollout batch size. Effective supervised batch is batch_size * dagger.samples_per_rollout.
+  batch_size: 4
+  optimizer: adam_atan2
+  betas: [0.9, 0.999]
+  lr: 2.0e-5
+  lr_schedule:
+    enabled: true
+    type: cosine
+    warmup_steps: 2500
+    min_lr: 2.0e-6
+  weight_decay: 0.0
+  mixed_precision: fp16
+  gradient_clip: 1.0
+  ema_decay: 0.997
+  ema_every: 10
+  cfg_dropout_text_prob: 0.1
+  cfg_dropout_motion_prob: 0.0
+  log_every: 50
+  save_every: 5000
+  skip_text_encode_errors: true
+  max_text_encode_retries: 16
+  max_checkpoints_to_keep: 10
+  empty_cache_every_step: false
+
+wandb:
+  enabled: true
+  project: kimodo-g1-distill
+  entity: null
+  name: g1_distill_16to8_100to20-dagger-teacher-only-50k-bs4x4-k3-cosine-selfacc10
+  group: null
+  job_type: train
+  tags: [g1, distill, 16to8, 100to20, dagger, rollout, phase2_20kf, teacher_only, bs4x4, k3, 50k, cosine_lr, self_acc10]
+  mode: online
+  resume: allow
+  id: null
