@@ -78,3 +78,93 @@ torchrun --standalone --nproc_per_node=4 \
 
 DAgger 必须使用专用脚本 `train_distill_g1_100_to_20_dagger_teacher_gt_selfacc.py`；基础
 `kimodo.distillation.train` 不会执行 Student rollout。
+
+
+## custom_motion数据集测试
+```bash
+export HF_HOME=./huggingface
+export TRANSFORMERS_OFFLINE=1
+export HF_HUB_OFFLINE=1
+DISTILL_CONFIG=kimodo/distillation/configs/distill_g1_100_to_20_schedule.yaml \
+DISTILL_CKPT=outputs/g1_distill_16to8_100to20_schedule/checkpoints/step_00010000.pt \
+ROOT_CONSTRAINT_MODE=xyzyaw KEYFRAME_STEP=10 \
+bash scripts/run_custom_npz_to_g1_full_pipeline.sh \
+  custom_motion/robot-object/sub10_largebox_000_original.npz \
+  sub10_largebox_000_ee_xyzyaw_distill_schedule
+```
+
+## g1数据集测试
+```bash
+DISTILL_CONFIG=kimodo/distillation/configs/distill_g1_100_to_20_dagger_10k_bs32x4.yaml \
+DISTILL_CKPT=outputs/g1_distill_16to8_100to20_schedule_dagger_10k_bs32x4_tw07_gt03/ema_final.pt \
+ROOT_CONSTRAINT_MODE=xyzyaw KEYFRAME_STEP=10 DIFFUSION_STEPS=20 \
+bash scripts/run_g1csv_to_g1_full_pipeline.sh \
+  dataset/g1/csv/230418/reach_jump_R_002__A334.csv \
+  reach_jump_A334_dagger
+```
+
+## humi数据集测试
+```bash
+DISTILL_CONFIG=kimodo/distillation/configs/distill_g1_100_to_20_dagger_10k_bs32x4.yaml \
+DISTILL_CKPT=outputs/g1_distill_16to8_100to20_schedule_dagger_10k_bs32x4_tw07_gt03/ema_final.pt \
+HUMI_SEGMENT_SEED=42 CUDA_VISIBLE_DEVICES=0 \
+ROOT_CONSTRAINT_MODE=xyzyaw KEYFRAME_STEP=20 DIFFUSION_STEPS=20 CFG_WEIGHTS="2.0 2.0"\
+bash scripts/run_humi_to_g1_full_pipeline.sh \
+  hf_humi_raw/proposal/raw_trajectories/recording_000.json \
+  proposal_000_dagger
+```
+
+## custom_motion数据集 批量测试误差
+```bash
+cd /pfs/pfs-ilWc5D/yzh/kimodo_my
+
+CUDA_VISIBLE_DEVICES=0 PYTHONPATH=. \
+python scripts/eval_original_overview_errors.py \
+  --npz_glob 'custom_motion/robot-object/sub10*_original.npz' \
+  --timeline_jsonl custom_motion/timeline_sub10.jsonl \
+  --distill_config kimodo/distillation/configs/distill_g1_100_to_20_dagger_10k_bs32x4.yaml \
+  --distill_ckpt outputs/g1_distill_16to8_100to20_schedule_dagger_10k_bs32x4_tw07_gt03/ema_final.pt \
+  --target_fps 30 \
+  --keyframe_step 10 \
+  --diffusion_steps 20 \
+  --num_runs_per_task 1 \
+  --output_json scripts/eval_custom_motion_sub10_dagger.json \
+  --verbose
+```
+
+## bones-seed 数据集 批量测试误差(抽0.001)
+```bash
+cd /pfs/pfs-ilWc5D/yzh/kimodo_my
+
+CUDA_VISIBLE_DEVICES=0 PYTHONPATH=. \
+python scripts/eval_g1_csv_overview_errors.py \
+  --csv_root dataset/g1/csv \
+  --timelines_jsonl dataset/timelines.jsonl \
+  --csv_pattern '*.csv' \
+  --sample_ratio 0.001 \
+  --seed 42 \
+  --distill_config kimodo/distillation/configs/distill_g1_100_to_20_dagger_10k_bs32x4.yaml \
+  --distill_ckpt outputs/g1_distill_16to8_100to20_schedule_dagger_10k_bs32x4_tw07_gt03/ema_final.pt \
+  --source_fps 120 \
+  --target_fps 30 \
+  --keyframe_step 10 \
+  --max_eval_frames 300 \
+  --diffusion_steps 20 \
+  --num_runs_per_task 5 \
+  --output_json scripts/eval_outputs/eval_distill_overview_g1csv_errors_summary_dagger.json \
+  --verbose
+```
+
+## 批量测试延迟
+```bash
+cd /pfs/pfs-ilWc5D/yzh/kimodo_my
+
+CUDA_VISIBLE_DEVICES=0 \
+FUTURE_FRAMES=24 \
+DISTILL_CONFIG=kimodo/distillation/configs/distill_g1_100_to_20_dagger_10k_bs32x4.yaml \
+DISTILL_CKPT=outputs/g1_distill_16to8_100to20_schedule_dagger_10k_bs32x4_tw07_gt03/ema_final.pt \
+DIFFUSION_STEPS=20 \
+WARMUP=5 \
+REPEATS=30 \
+bash scripts/run_benchmark_g1_generation_latency.sh
+```
