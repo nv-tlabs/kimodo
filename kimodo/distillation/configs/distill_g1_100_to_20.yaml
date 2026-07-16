@@ -101,6 +101,10 @@ data:
 loss:
   teacher_weight: 0.8
   gt_weight: 0.2
+  constraint_loss_weight: 1.0
+  hand_constraint_weight: 3.0
+  foot_constraint_weight: 1.5
+  root_constraint_weight: 1.0
   weight_schedule:
     enabled: false
     type: linear
@@ -130,7 +134,7 @@ phase2:
 training:
   seed: 42
   deterministic: false
-  output_dir: ./outputs/g1_distill_16to8_100to20
+  output_dir: ./outputs/g1_distill_16to8_100to20_constraint
 
   resume: null
   total_steps: 10000
@@ -155,10 +159,10 @@ wandb:
   enabled: true
   project: kimodo-g1-distill
   entity: null
-  name: g1_distill_16to8_100to20-2GPU
+  name: g1_distill_16to8_100to20-constraint-2GPU
   group: null
   job_type: train
-  tags: [g1, distill, 16to8, 100to20]
+  tags: [g1, distill, 16to8, 100to20, constraint_aware]
   mode: online
   resume: allow
   id: null

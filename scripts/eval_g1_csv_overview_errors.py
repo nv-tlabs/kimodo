@@ -10,6 +10,7 @@ import os
 import random
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
@@ -90,6 +91,24 @@ def parse_args() -> argparse.Namespace:
         default="scripts/eval_g1_csv_overview_errors_summary.json",
         help="Output summary JSON path.",
     )
+    parser.add_argument(
+        "--constraints_out_dir",
+        default=None,
+        help="Optional directory to persist generated 5-point constraint JSON files.",
+    )
+    parser.add_argument(
+        "--progress_jsonl",
+        default=None,
+        help="Optional JSONL path to append one result row per completed task.",
+    )
+    parser.add_argument(
+        "--videos_out_dir",
+        default=None,
+        help="Optional directory to save first-run qpos CSV and constraint-overlay MP4 for each task.",
+    )
+    parser.add_argument("--video_fps", type=int, default=30, help="Output video FPS when --videos_out_dir is set.")
+    parser.add_argument("--video_width", type=int, default=1280, help="Output video width when --videos_out_dir is set.")
+    parser.add_argument("--video_height", type=int, default=720, help="Output video height when --videos_out_dir is set.")
     parser.add_argument("--fail_fast", action="store_true", help="Stop immediately on one task failure.")
     parser.add_argument("--verbose", action="store_true", help="Print per-task details.")
     return parser.parse_args()
@@ -301,17 +320,72 @@ def _kimodo_to_mujoco_xyz(xyz_k: np.ndarray) -> np.ndarray:
     return np.asarray([xyz_k[2], xyz_k[0], xyz_k[1]], dtype=np.float64)
 
 
-def _evaluate_qpos_errors(qpos: np.ndarray, ee_constraint_item: dict[str, Any], mj_model: mujoco.MjModel) -> tuple[list[float], list[float]]:
+def _angle_abs_diff(a: float, b: float) -> float:
+    return float(abs((float(a) - float(b) + np.pi) % (2.0 * np.pi) - np.pi))
+
+
+def _rotation_angle_error(rot_a: np.ndarray, rot_b: np.ndarray) -> float:
+    rel = np.asarray(rot_a, dtype=np.float64).T @ np.asarray(rot_b, dtype=np.float64)
+    return float(R.from_matrix(rel).magnitude())
+
+
+def _evaluate_qpos_errors(qpos: np.ndarray, ee_constraint_item: dict[str, Any], mj_model: mujoco.MjModel) -> dict[str, Any]:
     frame_indices = ee_constraint_item.get("frame_indices", [])
     mj_data = mujoco.MjData(mj_model)
-    all_errors: list[float] = []
+    five_point_pos_errors: list[float] = []
+    ee_pos_errors: list[float] = []
     hand_errors: list[float] = []
+    foot_errors: list[float] = []
+    root_errors: list[float] = []
+    ee_rot_errors: list[float] = []
+    hand_rot_errors: list[float] = []
+    foot_rot_errors: list[float] = []
+    root_yaw_errors: list[float] = []
+    per_point_pos: dict[str, list[float]] = {
+        "root": [],
+        "left_hand": [],
+        "right_hand": [],
+        "left_foot": [],
+        "right_foot": [],
+    }
+    per_point_rot: dict[str, list[float]] = {
+        "root_yaw": [],
+        "left_hand": [],
+        "right_hand": [],
+        "left_foot": [],
+        "right_foot": [],
+    }
+    field_to_point = {
+        "left_hand_pose": "left_hand",
+        "right_hand_pose": "right_hand",
+        "left_foot_pose": "left_foot",
+        "right_foot_pose": "right_foot",
+    }
 
     for local_i, frame_idx in enumerate(frame_indices):
         if frame_idx < 0 or frame_idx >= len(qpos):
             continue
         mj_data.qpos[:] = qpos[frame_idx]
         mujoco.mj_forward(mj_model, mj_data)
+
+        root_xyzyaw = ee_constraint_item.get("root_xyzyaw")
+        if root_xyzyaw and local_i < len(root_xyzyaw):
+            expected_root_k = np.asarray(root_xyzyaw[local_i][:3], dtype=np.float64)
+            expected_root_m = _kimodo_to_mujoco_xyz(expected_root_k)
+            actual_root_m = np.asarray(qpos[frame_idx, :3], dtype=np.float64)
+            root_err = float(np.linalg.norm(actual_root_m - expected_root_m))
+            root_errors.append(root_err)
+            five_point_pos_errors.append(root_err)
+            per_point_pos["root"].append(root_err)
+
+            expected_yaw = float(root_xyzyaw[local_i][3])
+            actual_root_rot_m = R.from_quat(np.asarray(qpos[frame_idx, 3:7], dtype=np.float64), scalar_first=True).as_matrix()
+            actual_root_rot_k = rot_mujoco_to_kimodo(actual_root_rot_m)
+            actual_yaw = yaw_from_rot_kimodo(actual_root_rot_k)
+            yaw_err = _angle_abs_diff(actual_yaw, expected_yaw)
+            root_yaw_errors.append(yaw_err)
+            per_point_rot["root_yaw"].append(yaw_err)
+
         for field, body_name in FIELD_TO_BODY.items():
             poses = ee_constraint_item.get(field)
             if not poses:
@@ -321,10 +395,40 @@ def _evaluate_qpos_errors(qpos: np.ndarray, ee_constraint_item: dict[str, Any], 
             body_id = mujoco.mj_name2id(mj_model, mujoco.mjtObj.mjOBJ_BODY, body_name)
             actual = np.asarray(mj_data.xpos[body_id], dtype=np.float64)
             err = float(np.linalg.norm(actual - expected))
-            all_errors.append(err)
+            point_name = field_to_point[field]
+            ee_pos_errors.append(err)
+            five_point_pos_errors.append(err)
+            per_point_pos[point_name].append(err)
             if field in HAND_FIELDS:
                 hand_errors.append(err)
-    return all_errors, hand_errors
+            else:
+                foot_errors.append(err)
+
+            if len(poses[local_i]) >= 6:
+                expected_rot_k = R.from_euler("xyz", np.asarray(poses[local_i][3:6], dtype=np.float64)).as_matrix()
+                actual_rot_m = np.asarray(mj_data.xmat[body_id], dtype=np.float64).reshape(3, 3)
+                actual_rot_k = rot_mujoco_to_kimodo(actual_rot_m)
+                rot_err = _rotation_angle_error(actual_rot_k, expected_rot_k)
+                ee_rot_errors.append(rot_err)
+                per_point_rot[point_name].append(rot_err)
+                if field in HAND_FIELDS:
+                    hand_rot_errors.append(rot_err)
+                else:
+                    foot_rot_errors.append(rot_err)
+
+    return {
+        "five_point_pos_errors": five_point_pos_errors,
+        "ee_pos_errors": ee_pos_errors,
+        "hand_pos_errors": hand_errors,
+        "foot_pos_errors": foot_errors,
+        "root_pos_errors": root_errors,
+        "ee_rot_errors_rad": ee_rot_errors,
+        "hand_rot_errors_rad": hand_rot_errors,
+        "foot_rot_errors_rad": foot_rot_errors,
+        "root_yaw_errors_rad": root_yaw_errors,
+        "per_point_pos_errors": per_point_pos,
+        "per_point_rot_errors_rad": per_point_rot,
+    }
 
 
 def _safe_stats(values: list[float]) -> dict[str, float | int | None]:
@@ -344,6 +448,55 @@ def _safe_mean(values: list[float]) -> float | None:
         return None
     arr = np.asarray(values, dtype=np.float64)
     return float(arr.mean())
+
+
+def _safe_percentile(values: list[float], q: float) -> float | None:
+    if not values:
+        return None
+    return float(np.percentile(np.asarray(values, dtype=np.float64), q))
+
+
+def _sync_if_cuda(device: str) -> None:
+    if str(device).startswith("cuda"):
+        torch.cuda.synchronize()
+
+
+def _save_first_run_video(
+    *,
+    qpos: np.ndarray,
+    constraints_path: Path,
+    videos_out_dir: Path,
+    rel_parent: Path,
+    clip_stem: str,
+    xml_path: str,
+    fps: int,
+    width: int,
+    height: int,
+) -> dict[str, str]:
+    from render_mujoco_constraints_overlay import render as render_constraint_overlay
+
+    task_video_dir = videos_out_dir / rel_parent
+    task_video_dir.mkdir(parents=True, exist_ok=True)
+    qpos_path = task_video_dir / f"{clip_stem}.first_run.qpos.csv"
+    video_path = task_video_dir / f"{clip_stem}.first_run.constraints_overlay.mp4"
+    preview_path = task_video_dir / f"{clip_stem}.first_run.constraints_overlay.png"
+    np.savetxt(qpos_path, np.asarray(qpos, dtype=np.float64), delimiter=",")
+    render_constraint_overlay(
+        csv_path=qpos_path,
+        constraints_path=constraints_path,
+        output=video_path,
+        preview=preview_path,
+        xml_path=Path(xml_path),
+        fps=int(fps),
+        width=int(width),
+        height=int(height),
+        trail=True,
+    )
+    return {
+        "qpos_path": str(qpos_path),
+        "video_path": str(video_path),
+        "preview_path": str(preview_path),
+    }
 
 
 def _load_eval_model(args: argparse.Namespace, device: str):
@@ -451,6 +604,15 @@ def main() -> None:
     converter = MujocoQposConverter(model.skeleton)
     mj_model = mujoco.MjModel.from_xml_path(args.xml)
     timeline_map = _load_timeline_map(timeline_path)
+    constraints_out_dir = Path(args.constraints_out_dir) if args.constraints_out_dir else None
+    if constraints_out_dir is not None:
+        constraints_out_dir.mkdir(parents=True, exist_ok=True)
+    progress_jsonl = Path(args.progress_jsonl) if args.progress_jsonl else None
+    if progress_jsonl is not None:
+        progress_jsonl.parent.mkdir(parents=True, exist_ok=True)
+    videos_out_dir = Path(args.videos_out_dir) if args.videos_out_dir else None
+    if videos_out_dir is not None:
+        videos_out_dir.mkdir(parents=True, exist_ok=True)
 
     if args.verbose:
         print(f"Loaded model: {resolved_model} on {device}")
@@ -458,8 +620,16 @@ def main() -> None:
 
     per_task = []
     failures: list[dict[str, str]] = []
+    all_five_point_errors: list[float] = []
     all_ee_errors: list[float] = []
     all_hand_errors: list[float] = []
+    all_foot_errors: list[float] = []
+    all_root_errors: list[float] = []
+    all_ee_rot_errors: list[float] = []
+    all_hand_rot_errors: list[float] = []
+    all_foot_rot_errors: list[float] = []
+    all_root_yaw_errors: list[float] = []
+    all_generation_latencies: list[float] = []
 
     with tempfile.TemporaryDirectory(prefix="kimodo_eval_g1_csv_") as tmpdir:
         tmpdir_path = Path(tmpdir)
@@ -500,6 +670,13 @@ def main() -> None:
 
                 constraints_path = tmpdir_path / f"{idx:06d}_{clip_stem}.constraints.json"
                 constraints_path.write_text(json.dumps([ee_constraint], indent=2), encoding="utf-8")
+                persisted_constraints_path = None
+                if constraints_out_dir is not None:
+                    rel_parent = csv_path.relative_to(csv_root).parent
+                    task_constraints_dir = constraints_out_dir / rel_parent
+                    task_constraints_dir.mkdir(parents=True, exist_ok=True)
+                    persisted_constraints_path = task_constraints_dir / f"{clip_stem}.five_pose_constraints.json"
+                    persisted_constraints_path.write_text(json.dumps([ee_constraint], indent=2), encoding="utf-8")
 
                 duration = float(local_joint_rots.shape[0]) / float(args.source_fps)
                 num_frames, _ = resolve_num_frames(duration, float(model.fps), str(constraints_path))
@@ -510,10 +687,21 @@ def main() -> None:
                 run_maxes: list[float] = []
                 run_mins: list[float] = []
                 run_num_points: list[int] = []
+                run_latencies: list[float] = []
+                clip_five_point_errors_all_runs: list[float] = []
                 clip_ee_errors_all_runs: list[float] = []
                 clip_hand_errors_all_runs: list[float] = []
+                clip_foot_errors_all_runs: list[float] = []
+                clip_root_errors_all_runs: list[float] = []
+                clip_ee_rot_errors_all_runs: list[float] = []
+                clip_hand_rot_errors_all_runs: list[float] = []
+                clip_foot_rot_errors_all_runs: list[float] = []
+                clip_root_yaw_errors_all_runs: list[float] = []
+                video_artifacts: dict[str, str] = {}
 
-                for _ in range(int(args.num_runs_per_task)):
+                for run_idx in range(int(args.num_runs_per_task)):
+                    _sync_if_cuda(device)
+                    t0 = time.perf_counter()
                     output = model(
                         prompt,
                         num_frames,
@@ -525,14 +713,31 @@ def main() -> None:
                         return_numpy=True,
                         first_heading_angle=torch.tensor([first_heading], dtype=torch.float32, device=device),
                     )
+                    _sync_if_cuda(device)
+                    run_latencies.append(time.perf_counter() - t0)
 
                     pred_qpos = converter.dict_to_qpos(output, device)
                     pred_qpos = np.asarray(pred_qpos, dtype=np.float64)
                     if pred_qpos.ndim == 3:
                         pred_qpos = pred_qpos[0]
 
-                    run_ee_errors, run_hand_errors = _evaluate_qpos_errors(pred_qpos, ee_constraint, mj_model)
-                    run_stats = _safe_stats(run_ee_errors)
+                    if videos_out_dir is not None and run_idx == 0:
+                        rel_parent = csv_path.relative_to(csv_root).parent
+                        video_artifacts = _save_first_run_video(
+                            qpos=pred_qpos,
+                            constraints_path=constraints_path,
+                            videos_out_dir=videos_out_dir,
+                            rel_parent=rel_parent,
+                            clip_stem=clip_stem,
+                            xml_path=args.xml,
+                            fps=int(args.video_fps),
+                            width=int(args.video_width),
+                            height=int(args.video_height),
+                        )
+
+                    err = _evaluate_qpos_errors(pred_qpos, ee_constraint, mj_model)
+                    run_five = err["five_point_pos_errors"]
+                    run_stats = _safe_stats(run_five)
                     if run_stats["mean_error_m"] is not None:
                         run_means.append(float(run_stats["mean_error_m"]))
                     if run_stats["max_error_m"] is not None:
@@ -540,8 +745,15 @@ def main() -> None:
                     if run_stats["min_error_m"] is not None:
                         run_mins.append(float(run_stats["min_error_m"]))
                     run_num_points.append(int(run_stats["count"]))
-                    clip_ee_errors_all_runs.extend(run_ee_errors)
-                    clip_hand_errors_all_runs.extend(run_hand_errors)
+                    clip_five_point_errors_all_runs.extend(run_five)
+                    clip_ee_errors_all_runs.extend(err["ee_pos_errors"])
+                    clip_hand_errors_all_runs.extend(err["hand_pos_errors"])
+                    clip_foot_errors_all_runs.extend(err["foot_pos_errors"])
+                    clip_root_errors_all_runs.extend(err["root_pos_errors"])
+                    clip_ee_rot_errors_all_runs.extend(err["ee_rot_errors_rad"])
+                    clip_hand_rot_errors_all_runs.extend(err["hand_rot_errors_rad"])
+                    clip_foot_rot_errors_all_runs.extend(err["foot_rot_errors_rad"])
+                    clip_root_yaw_errors_all_runs.extend(err["root_yaw_errors_rad"])
 
                 clip_stats = {
                     "count": int(np.mean(run_num_points)) if run_num_points else 0,
@@ -549,24 +761,52 @@ def main() -> None:
                     "max_error_m": _safe_mean(run_maxes),
                     "min_error_m": _safe_mean(run_mins),
                 }
-                per_task.append(
-                    {
-                        "task": task_name,
-                        "clip": clip_stem,
-                        "num_constraint_points": clip_stats["count"],
-                        "mean_error_m": clip_stats["mean_error_m"],
-                        "max_error_m": clip_stats["max_error_m"],
-                        "min_error_m": clip_stats["min_error_m"],
-                        "num_runs": int(args.num_runs_per_task),
-                    }
-                )
+                task_row = {
+                    "task": task_name,
+                    "clip": clip_stem,
+                    "prompt": prompt,
+                    "constraints_path": str(persisted_constraints_path) if persisted_constraints_path else None,
+                    "num_frames": int(num_frames),
+                    "duration_sec": float(duration),
+                    "num_keyframes": int(len(ee_constraint.get("frame_indices", []))),
+                    "num_constraint_points": clip_stats["count"],
+                    "five_point_mean_error_m": clip_stats["mean_error_m"],
+                    "five_point_max_error_m": clip_stats["max_error_m"],
+                    "five_point_min_error_m": clip_stats["min_error_m"],
+                    "five_point_p95_error_m": _safe_percentile(clip_five_point_errors_all_runs, 95),
+                    "ee4_mean_error_m": _safe_mean(clip_ee_errors_all_runs),
+                    "hand2_mean_error_m": _safe_mean(clip_hand_errors_all_runs),
+                    "foot2_mean_error_m": _safe_mean(clip_foot_errors_all_runs),
+                    "root_mean_error_m": _safe_mean(clip_root_errors_all_runs),
+                    "ee4_mean_rot_error_rad": _safe_mean(clip_ee_rot_errors_all_runs),
+                    "hand2_mean_rot_error_rad": _safe_mean(clip_hand_rot_errors_all_runs),
+                    "foot2_mean_rot_error_rad": _safe_mean(clip_foot_rot_errors_all_runs),
+                    "root_mean_yaw_error_rad": _safe_mean(clip_root_yaw_errors_all_runs),
+                    "generation_latency_mean_sec": _safe_mean(run_latencies),
+                    "generation_latency_p50_sec": _safe_percentile(run_latencies, 50),
+                    "generation_latency_p95_sec": _safe_percentile(run_latencies, 95),
+                    "num_runs": int(args.num_runs_per_task),
+                    **video_artifacts,
+                }
+                per_task.append(task_row)
+                if progress_jsonl is not None:
+                    with progress_jsonl.open("a", encoding="utf-8") as f:
+                        f.write(json.dumps(task_row, ensure_ascii=False) + "\n")
+                all_five_point_errors.extend(clip_five_point_errors_all_runs)
                 all_ee_errors.extend(clip_ee_errors_all_runs)
                 all_hand_errors.extend(clip_hand_errors_all_runs)
+                all_foot_errors.extend(clip_foot_errors_all_runs)
+                all_root_errors.extend(clip_root_errors_all_runs)
+                all_ee_rot_errors.extend(clip_ee_rot_errors_all_runs)
+                all_hand_rot_errors.extend(clip_hand_rot_errors_all_runs)
+                all_foot_rot_errors.extend(clip_foot_rot_errors_all_runs)
+                all_root_yaw_errors.extend(clip_root_yaw_errors_all_runs)
+                all_generation_latencies.extend(run_latencies)
                 if args.verbose:
                     print(
-                        f"  mean={clip_stats['mean_error_m']:.6f} "
+                        f"  five_mean={clip_stats['mean_error_m']:.6f} "
                         f"max={clip_stats['max_error_m']:.6f} "
-                        f"min={clip_stats['min_error_m']:.6f}"
+                        f"latency={task_row['generation_latency_mean_sec']:.3f}s"
                     )
             except Exception as exc:  # noqa: BLE001
                 failures.append({"task": task_name, "error": str(exc)})
@@ -577,9 +817,18 @@ def main() -> None:
                 if args.fail_fast:
                     raise
 
+    overall_five_point = _safe_stats(all_five_point_errors)
     overall_all_ee = _safe_stats(all_ee_errors)
     overall_hands = _safe_stats(all_hand_errors)
-    per_task_means = [float(x["mean_error_m"]) for x in per_task if x.get("mean_error_m") is not None]
+    overall_feet = _safe_stats(all_foot_errors)
+    overall_root = _safe_stats(all_root_errors)
+    overall_ee_rot = _safe_stats(all_ee_rot_errors)
+    overall_hand_rot = _safe_stats(all_hand_rot_errors)
+    overall_foot_rot = _safe_stats(all_foot_rot_errors)
+    overall_root_yaw = _safe_stats(all_root_yaw_errors)
+    per_task_means = [
+        float(x["five_point_mean_error_m"]) for x in per_task if x.get("five_point_mean_error_m") is not None
+    ]
     overall_mean_of_task_means = _safe_mean(per_task_means)
 
     result = {
@@ -600,15 +849,35 @@ def main() -> None:
             "diffusion_steps": int(args.diffusion_steps),
             "num_runs_per_task": int(args.num_runs_per_task),
             "xml": args.xml,
+            "constraints_out_dir": args.constraints_out_dir,
+            "progress_jsonl": args.progress_jsonl,
+            "videos_out_dir": args.videos_out_dir,
+            "video_fps": int(args.video_fps),
+            "video_width": int(args.video_width),
+            "video_height": int(args.video_height),
         },
         "total_csv": len(all_csv_paths),
         "sampled_tasks": len(csv_paths),
         "success_tasks": len(per_task),
         "failed_tasks": len(failures),
         "per_task": per_task,
+        "overall_five_point": overall_five_point,
         "overall_all_ee": overall_all_ee,
         "overall_hands_only": overall_hands,
+        "overall_feet_only": overall_feet,
+        "overall_root_only": overall_root,
+        "overall_ee_rotation_rad": overall_ee_rot,
+        "overall_hand_rotation_rad": overall_hand_rot,
+        "overall_foot_rotation_rad": overall_foot_rot,
+        "overall_root_yaw_rad": overall_root_yaw,
         "overall_mean_of_task_means_m": overall_mean_of_task_means,
+        "generation_latency_sec": {
+            "mean": _safe_mean(all_generation_latencies),
+            "p50": _safe_percentile(all_generation_latencies, 50),
+            "p95": _safe_percentile(all_generation_latencies, 95),
+            "min": min(all_generation_latencies) if all_generation_latencies else None,
+            "max": max(all_generation_latencies) if all_generation_latencies else None,
+        },
         "failures": failures,
     }
 
@@ -618,7 +887,7 @@ def main() -> None:
     print(
         "Done: "
         f"success={len(per_task)}/{len(csv_paths)}, failed={len(failures)}, "
-        f"overall_mean_error_m={overall_all_ee['mean_error_m']}, "
+        f"overall_five_point_mean_error_m={overall_five_point['mean_error_m']}, "
         f"overall_mean_of_task_means_m={overall_mean_of_task_means}, json={output_path}"
     )
 

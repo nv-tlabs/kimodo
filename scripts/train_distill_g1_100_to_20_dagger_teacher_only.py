@@ -50,6 +50,7 @@ from kimodo.distillation.train import (
     setup_distributed,
     should_use_phase2,
 )
+from kimodo.distillation.loss import compute_constraint_loss
 from kimodo.training.loss import LOSS_NAMES, compute_kimodo_loss
 from kimodo.model.diffusion import DDIMSampler, Diffusion
 from kimodo.model.loading import instantiate_from_dict
@@ -544,6 +545,27 @@ def main() -> None:
                 input_is_normalized=bool(cfg.data.dataset.to_normalize),
             )
             loss = loss_dict["total"] * float(cfg.loss.get("teacher_weight", 1.0))
+            constraint_loss_weight = float(cfg.loss.get("constraint_loss_weight", 0.0))
+            constraint_loss_dict = {
+                "total": student_x0.new_zeros(()),
+                "position": student_x0.new_zeros(()),
+                "rotation": student_x0.new_zeros(()),
+                "root": student_x0.new_zeros(()),
+                "observed_count": student_x0.new_zeros(()),
+            }
+            if constraint_loss_weight > 0.0:
+                constraint_loss_dict = compute_constraint_loss(
+                    pred_x0=student_x0,
+                    observed_motion=observed_motion_rep,
+                    motion_mask=motion_mask_rep,
+                    motion_rep=motion_rep,
+                    pad_mask=pad_mask_rep,
+                    input_is_normalized=bool(cfg.data.dataset.to_normalize),
+                    hand_constraint_weight=float(cfg.loss.get("hand_constraint_weight", 3.0)),
+                    foot_constraint_weight=float(cfg.loss.get("foot_constraint_weight", 1.5)),
+                    root_constraint_weight=float(cfg.loss.get("root_constraint_weight", 1.0)),
+                )
+                loss = loss + constraint_loss_weight * constraint_loss_dict["total"]
             self_acc_weight = float(cfg.loss.get("self_acc_weight", 0.0))
             self_acc_loss = student_x0.new_zeros(())
             if self_acc_weight > 0.0:
@@ -575,6 +597,26 @@ def main() -> None:
         if (global_step + 1) % log_every == 0 or global_step == 0:
             reduced_total = reduce_scalar(loss.detach(), world_size, is_distributed)
             reduced_teacher_total = reduce_scalar(loss_dict["total"].detach(), world_size, is_distributed)
+            reduced_constraint_total = reduce_scalar(
+                constraint_loss_dict["total"].detach(),
+                world_size,
+                is_distributed,
+            )
+            reduced_constraint_pos = reduce_scalar(
+                constraint_loss_dict["position"].detach(),
+                world_size,
+                is_distributed,
+            )
+            reduced_constraint_rot = reduce_scalar(
+                constraint_loss_dict["rotation"].detach(),
+                world_size,
+                is_distributed,
+            )
+            reduced_constraint_root = reduce_scalar(
+                constraint_loss_dict["root"].detach(),
+                world_size,
+                is_distributed,
+            )
             reduced_self_acc = reduce_scalar(self_acc_loss.detach(), world_size, is_distributed)
             mean_schedule_idx = reduce_scalar(schedule_idx.float().mean(), world_size, is_distributed)
             reduced_teacher_terms = {
@@ -598,8 +640,14 @@ def main() -> None:
                     "loss_total": float(reduced_total.item()),
                     "loss_teacher_total": float(reduced_teacher_total.item()),
                     "loss_gt_total": 0.0,
+                    "loss_constraint_total": float(reduced_constraint_total.item()),
+                    "loss_constraint_position": float(reduced_constraint_pos.item()),
+                    "loss_constraint_rotation": float(reduced_constraint_rot.item()),
+                    "loss_constraint_root": float(reduced_constraint_root.item()),
                     "teacher_weight": float(cfg.loss.get("teacher_weight", 1.0)),
                     "gt_weight": 0.0,
+                    "constraint_loss_weight": float(constraint_loss_weight),
+                    "constraint_observed_count": float(constraint_loss_dict["observed_count"].detach().item()),
                     "self_acc_weight": float(cfg.loss.get("self_acc_weight", 0.0)),
                     "self_acc_loss": float(reduced_self_acc.item()),
                     "self_acc_weighted": float(reduced_self_acc.item()) * float(cfg.loss.get("self_acc_weight", 0.0)),
@@ -610,15 +658,18 @@ def main() -> None:
                     metric[f"teacher_{name}"] = float(reduced_teacher_terms[name].item())
                     metric[f"teacher_weighted_{name}"] = float(reduced_teacher_weighted_terms[name].item())
                 log.info(
-                    "step=%d kf=%d loss=%.6f teacher=%.6f gt=%.6f tw=%.3f gw=%.3f "
+                    "step=%d kf=%d loss=%.6f teacher=%.6f gt=%.6f constraint=%.6f "
+                    "tw=%.3f gw=%.3f cw=%.3f "
                     "self_acc=%.6f saw=%.3f rollout_bs=%d k=%d eff_bs=%d mean_sched=%.2f lr=%.3e",
                     metric["step"],
                     metric["num_keyframes"],
                     metric["loss_total"],
                     metric["loss_teacher_total"],
                     metric["loss_gt_total"],
+                    metric["loss_constraint_total"],
                     metric["teacher_weight"],
                     metric["gt_weight"],
+                    metric["constraint_loss_weight"],
                     metric["self_acc_loss"],
                     metric["self_acc_weight"],
                     metric["rollout_batch_size"],
@@ -646,6 +697,7 @@ def main() -> None:
             teacher_x0,
             student_x0,
             loss_dict,
+            constraint_loss_dict,
             loss,
             self_acc_loss,
         )

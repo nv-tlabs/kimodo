@@ -50,6 +50,7 @@ from kimodo.distillation.train import (
     setup_distributed,
     should_use_phase2,
 )
+from kimodo.distillation.loss import compute_constraint_loss, constraint_feature_acceleration_loss
 from kimodo.training.loss import LOSS_NAMES, compute_kimodo_loss
 from kimodo.model.diffusion import DDIMSampler, Diffusion
 from kimodo.model.loading import instantiate_from_dict
@@ -188,6 +189,13 @@ def repeat_optional(x: Optional[torch.Tensor], repeats: int) -> Optional[torch.T
     if x is None:
         return None
     return x.repeat_interleave(int(repeats), dim=0)
+
+
+def get_dataset_num_keyframes(dataset: Any) -> int:
+    getter = getattr(dataset, "get_phase2_num_keyframes", None)
+    if callable(getter):
+        return int(getter())
+    return 0
 
 
 def masked_second_difference_l1(pred: torch.Tensor, pad_mask: torch.Tensor) -> torch.Tensor:
@@ -584,13 +592,51 @@ def main() -> None:
             )
             teacher_weight = float(cfg.loss.get("teacher_weight", 1.0))
             gt_weight = float(cfg.loss.get("gt_weight", 0.0))
+            legacy_constraint_loss_weight = float(cfg.loss.get("constraint_loss_weight", 0.0))
+            teacher_constraint_loss_weight = float(
+                cfg.loss.get("teacher_constraint_loss_weight", legacy_constraint_loss_weight)
+            )
+            gt_constraint_loss_weight = float(cfg.loss.get("gt_constraint_loss_weight", legacy_constraint_loss_weight))
+            constraint_loss_weight = (
+                teacher_weight * teacher_constraint_loss_weight
+                + gt_weight * gt_constraint_loss_weight
+            )
             loss = teacher_loss_dict["total"] * teacher_weight + gt_loss_dict["total"] * gt_weight
+            constraint_loss_dict = {
+                "total": student_x0.new_zeros(()),
+                "position": student_x0.new_zeros(()),
+                "rotation": student_x0.new_zeros(()),
+                "root": student_x0.new_zeros(()),
+                "observed_count": student_x0.new_zeros(()),
+            }
+            if teacher_constraint_loss_weight > 0.0 or gt_constraint_loss_weight > 0.0:
+                constraint_loss_dict = compute_constraint_loss(
+                    pred_x0=student_x0,
+                    observed_motion=observed_motion_rep,
+                    motion_mask=motion_mask_rep,
+                    motion_rep=motion_rep,
+                    pad_mask=pad_mask_rep,
+                    input_is_normalized=bool(cfg.data.dataset.to_normalize),
+                    hand_constraint_weight=float(cfg.loss.get("hand_constraint_weight", 3.0)),
+                    foot_constraint_weight=float(cfg.loss.get("foot_constraint_weight", 1.5)),
+                    root_constraint_weight=float(cfg.loss.get("root_constraint_weight", 1.0)),
+                )
+                loss = loss + teacher_weight * teacher_constraint_loss_weight * constraint_loss_dict["total"]
+                loss = loss + gt_weight * gt_constraint_loss_weight * constraint_loss_dict["total"]
             self_acc_weight = float(cfg.loss.get("self_acc_weight", 0.0))
             root_acc_weight = float(cfg.loss.get("root_acc_weight", 0.0))
             heading_acc_weight = float(cfg.loss.get("heading_acc_weight", 0.0))
+            constraint_root_acc_weight = float(cfg.loss.get("constraint_root_acc_weight", 0.0))
+            constraint_heading_acc_weight = float(cfg.loss.get("constraint_heading_acc_weight", 0.0))
+            constraint_hand_pos_acc_weight = float(cfg.loss.get("constraint_hand_pos_acc_weight", 0.0))
+            constraint_hand_rot_acc_weight = float(cfg.loss.get("constraint_hand_rot_acc_weight", 0.0))
             self_acc_loss = student_x0.new_zeros(())
             root_acc_loss = student_x0.new_zeros(())
             heading_acc_loss = student_x0.new_zeros(())
+            constraint_root_acc_loss = student_x0.new_zeros(())
+            constraint_heading_acc_loss = student_x0.new_zeros(())
+            constraint_hand_pos_acc_loss = student_x0.new_zeros(())
+            constraint_hand_rot_acc_loss = student_x0.new_zeros(())
             if self_acc_weight > 0.0:
                 self_acc_loss = self_acceleration_loss(
                     student_x0,
@@ -617,6 +663,60 @@ def main() -> None:
                     feature_names=("global_root_heading",),
                 )
                 loss = loss + heading_acc_weight * heading_acc_loss
+            if constraint_root_acc_weight > 0.0:
+                constraint_root_acc_dims = tuple(int(x) for x in cfg.loss.get("constraint_root_acc_dims", [0, 2]))
+                constraint_root_acc_loss = constraint_feature_acceleration_loss(
+                    pred_x0=student_x0,
+                    observed_motion=observed_motion_rep,
+                    motion_mask=motion_mask_rep,
+                    motion_rep=motion_rep,
+                    pad_mask=pad_mask_rep,
+                    input_is_normalized=bool(cfg.data.dataset.to_normalize),
+                    feature_name="smooth_root_pos",
+                    feature_dims=constraint_root_acc_dims,
+                )
+                loss = loss + constraint_root_acc_weight * constraint_root_acc_loss
+            if constraint_heading_acc_weight > 0.0:
+                constraint_heading_acc_loss = constraint_feature_acceleration_loss(
+                    pred_x0=student_x0,
+                    observed_motion=observed_motion_rep,
+                    motion_mask=motion_mask_rep,
+                    motion_rep=motion_rep,
+                    pad_mask=pad_mask_rep,
+                    input_is_normalized=bool(cfg.data.dataset.to_normalize),
+                    feature_name="global_root_heading",
+                )
+                loss = loss + constraint_heading_acc_weight * constraint_heading_acc_loss
+            if constraint_hand_pos_acc_weight > 0.0:
+                constraint_hand_pos_acc_dims = tuple(
+                    int(x) for x in cfg.loss.get("constraint_hand_pos_acc_dims", [])
+                )
+                constraint_hand_pos_acc_loss = constraint_feature_acceleration_loss(
+                    pred_x0=student_x0,
+                    observed_motion=observed_motion_rep,
+                    motion_mask=motion_mask_rep,
+                    motion_rep=motion_rep,
+                    pad_mask=pad_mask_rep,
+                    input_is_normalized=bool(cfg.data.dataset.to_normalize),
+                    feature_name="local_joints_positions",
+                    feature_dims=constraint_hand_pos_acc_dims or None,
+                )
+                loss = loss + constraint_hand_pos_acc_weight * constraint_hand_pos_acc_loss
+            if constraint_hand_rot_acc_weight > 0.0:
+                constraint_hand_rot_acc_dims = tuple(
+                    int(x) for x in cfg.loss.get("constraint_hand_rot_acc_dims", [])
+                )
+                constraint_hand_rot_acc_loss = constraint_feature_acceleration_loss(
+                    pred_x0=student_x0,
+                    observed_motion=observed_motion_rep,
+                    motion_mask=motion_mask_rep,
+                    motion_rep=motion_rep,
+                    pad_mask=pad_mask_rep,
+                    input_is_normalized=bool(cfg.data.dataset.to_normalize),
+                    feature_name="global_rot_data",
+                    feature_dims=constraint_hand_rot_acc_dims or None,
+                )
+                loss = loss + constraint_hand_rot_acc_weight * constraint_hand_rot_acc_loss
 
         if use_scaler:
             scaler.scale(loss).backward()
@@ -639,9 +739,49 @@ def main() -> None:
             reduced_total = reduce_scalar(loss.detach(), world_size, is_distributed)
             reduced_teacher_total = reduce_scalar(teacher_loss_dict["total"].detach(), world_size, is_distributed)
             reduced_gt_total = reduce_scalar(gt_loss_dict["total"].detach(), world_size, is_distributed)
+            reduced_constraint_total = reduce_scalar(
+                constraint_loss_dict["total"].detach(),
+                world_size,
+                is_distributed,
+            )
+            reduced_constraint_pos = reduce_scalar(
+                constraint_loss_dict["position"].detach(),
+                world_size,
+                is_distributed,
+            )
+            reduced_constraint_rot = reduce_scalar(
+                constraint_loss_dict["rotation"].detach(),
+                world_size,
+                is_distributed,
+            )
+            reduced_constraint_root = reduce_scalar(
+                constraint_loss_dict["root"].detach(),
+                world_size,
+                is_distributed,
+            )
             reduced_self_acc = reduce_scalar(self_acc_loss.detach(), world_size, is_distributed)
             reduced_root_acc = reduce_scalar(root_acc_loss.detach(), world_size, is_distributed)
             reduced_heading_acc = reduce_scalar(heading_acc_loss.detach(), world_size, is_distributed)
+            reduced_constraint_root_acc = reduce_scalar(
+                constraint_root_acc_loss.detach(),
+                world_size,
+                is_distributed,
+            )
+            reduced_constraint_heading_acc = reduce_scalar(
+                constraint_heading_acc_loss.detach(),
+                world_size,
+                is_distributed,
+            )
+            reduced_constraint_hand_pos_acc = reduce_scalar(
+                constraint_hand_pos_acc_loss.detach(),
+                world_size,
+                is_distributed,
+            )
+            reduced_constraint_hand_rot_acc = reduce_scalar(
+                constraint_hand_rot_acc_loss.detach(),
+                world_size,
+                is_distributed,
+            )
             mean_schedule_idx = reduce_scalar(schedule_idx.float().mean(), world_size, is_distributed)
             reduced_teacher_terms = {
                 name: reduce_scalar(teacher_loss_dict[name].detach(), world_size, is_distributed)
@@ -664,7 +804,7 @@ def main() -> None:
                 metric = {
                     "step": global_step,
                     "epoch": epoch,
-                    "num_keyframes": int(dataset.get_phase2_num_keyframes()),
+                    "num_keyframes": get_dataset_num_keyframes(dataset),
                     "rollout_batch_size": int(gt_x0.shape[0]),
                     "samples_per_rollout": samples_per_rollout,
                     "effective_supervision_batch": int(x_t.shape[0]),
@@ -672,8 +812,23 @@ def main() -> None:
                     "loss_total": float(reduced_total.item()),
                     "loss_teacher_total": float(reduced_teacher_total.item()),
                     "loss_gt_total": float(reduced_gt_total.item()),
+                    "loss_constraint_total": float(reduced_constraint_total.item()),
+                    "loss_constraint_position": float(reduced_constraint_pos.item()),
+                    "loss_constraint_rotation": float(reduced_constraint_rot.item()),
+                    "loss_constraint_root": float(reduced_constraint_root.item()),
                     "teacher_weight": float(teacher_weight),
                     "gt_weight": float(gt_weight),
+                    "constraint_loss_weight": float(constraint_loss_weight),
+                    "legacy_constraint_loss_weight": float(legacy_constraint_loss_weight),
+                    "teacher_constraint_loss_weight": float(teacher_constraint_loss_weight),
+                    "gt_constraint_loss_weight": float(gt_constraint_loss_weight),
+                    "teacher_constraint_weighted": float(reduced_constraint_total.item())
+                    * float(teacher_weight)
+                    * float(teacher_constraint_loss_weight),
+                    "gt_constraint_weighted": float(reduced_constraint_total.item())
+                    * float(gt_weight)
+                    * float(gt_constraint_loss_weight),
+                    "constraint_observed_count": float(constraint_loss_dict["observed_count"].detach().item()),
                     "self_acc_weight": float(cfg.loss.get("self_acc_weight", 0.0)),
                     "self_acc_loss": float(reduced_self_acc.item()),
                     "self_acc_weighted": float(reduced_self_acc.item()) * float(cfg.loss.get("self_acc_weight", 0.0)),
@@ -684,6 +839,22 @@ def main() -> None:
                     "heading_acc_loss": float(reduced_heading_acc.item()),
                     "heading_acc_weighted": float(reduced_heading_acc.item())
                     * float(cfg.loss.get("heading_acc_weight", 0.0)),
+                    "constraint_root_acc_weight": float(cfg.loss.get("constraint_root_acc_weight", 0.0)),
+                    "constraint_root_acc_loss": float(reduced_constraint_root_acc.item()),
+                    "constraint_root_acc_weighted": float(reduced_constraint_root_acc.item())
+                    * float(cfg.loss.get("constraint_root_acc_weight", 0.0)),
+                    "constraint_heading_acc_weight": float(cfg.loss.get("constraint_heading_acc_weight", 0.0)),
+                    "constraint_heading_acc_loss": float(reduced_constraint_heading_acc.item()),
+                    "constraint_heading_acc_weighted": float(reduced_constraint_heading_acc.item())
+                    * float(cfg.loss.get("constraint_heading_acc_weight", 0.0)),
+                    "constraint_hand_pos_acc_weight": float(cfg.loss.get("constraint_hand_pos_acc_weight", 0.0)),
+                    "constraint_hand_pos_acc_loss": float(reduced_constraint_hand_pos_acc.item()),
+                    "constraint_hand_pos_acc_weighted": float(reduced_constraint_hand_pos_acc.item())
+                    * float(cfg.loss.get("constraint_hand_pos_acc_weight", 0.0)),
+                    "constraint_hand_rot_acc_weight": float(cfg.loss.get("constraint_hand_rot_acc_weight", 0.0)),
+                    "constraint_hand_rot_acc_loss": float(reduced_constraint_hand_rot_acc.item()),
+                    "constraint_hand_rot_acc_weighted": float(reduced_constraint_hand_rot_acc.item())
+                    * float(cfg.loss.get("constraint_hand_rot_acc_weight", 0.0)),
                     "lr": float(active_lr),
                     "time": time.time(),
                 }
@@ -693,22 +864,34 @@ def main() -> None:
                     metric[f"gt_{name}"] = float(reduced_gt_terms[name].item())
                     metric[f"gt_weighted_{name}"] = float(reduced_gt_weighted_terms[name].item())
                 log.info(
-                    "step=%d kf=%d loss=%.6f teacher=%.6f gt=%.6f tw=%.3f gw=%.3f "
+                    "step=%d kf=%d loss=%.6f teacher=%.6f gt=%.6f constraint=%.6f "
+                    "tw=%.3f gw=%.3f tcw=%.3f gcw=%.3f ceff=%.3f "
                     "self_acc=%.6f saw=%.3f root_acc=%.6f raw=%.3f heading_acc=%.6f haw=%.3f "
+                    "constraint_root_acc=%.6f craw=%.3f hand_pos_acc=%.6f hpaw=%.3f hand_rot_acc=%.6f hraw=%.3f "
                     "rollout_bs=%d k=%d eff_bs=%d mean_sched=%.2f lr=%.3e",
                     metric["step"],
                     metric["num_keyframes"],
                     metric["loss_total"],
                     metric["loss_teacher_total"],
                     metric["loss_gt_total"],
+                    metric["loss_constraint_total"],
                     metric["teacher_weight"],
                     metric["gt_weight"],
+                    metric["teacher_constraint_loss_weight"],
+                    metric["gt_constraint_loss_weight"],
+                    metric["constraint_loss_weight"],
                     metric["self_acc_loss"],
                     metric["self_acc_weight"],
                     metric["root_acc_loss"],
                     metric["root_acc_weight"],
                     metric["heading_acc_loss"],
                     metric["heading_acc_weight"],
+                    metric["constraint_root_acc_loss"],
+                    metric["constraint_root_acc_weight"],
+                    metric["constraint_hand_pos_acc_loss"],
+                    metric["constraint_hand_pos_acc_weight"],
+                    metric["constraint_hand_rot_acc_loss"],
+                    metric["constraint_hand_rot_acc_weight"],
                     metric["rollout_batch_size"],
                     metric["samples_per_rollout"],
                     metric["effective_supervision_batch"],
@@ -736,10 +919,15 @@ def main() -> None:
             student_x0,
             teacher_loss_dict,
             gt_loss_dict,
+            constraint_loss_dict,
             loss,
             self_acc_loss,
             root_acc_loss,
             heading_acc_loss,
+            constraint_root_acc_loss,
+            constraint_heading_acc_loss,
+            constraint_hand_pos_acc_loss,
+            constraint_hand_rot_acc_loss,
         )
         if device.type == "cuda" and bool(cfg.training.get("empty_cache_every_step", False)):
             torch.cuda.empty_cache()

@@ -282,6 +282,10 @@ def main() -> None:
         gt_gammas=cfg.loss.gt_gammas,
         teacher_weight=float(cfg.loss.teacher_weight),
         gt_weight=float(cfg.loss.gt_weight),
+        constraint_loss_weight=float(cfg.loss.get("constraint_loss_weight", 0.0)),
+        hand_constraint_weight=float(cfg.loss.get("hand_constraint_weight", 3.0)),
+        foot_constraint_weight=float(cfg.loss.get("foot_constraint_weight", 1.5)),
+        root_constraint_weight=float(cfg.loss.get("root_constraint_weight", 1.0)),
         input_is_normalized=bool(cfg.data.dataset.to_normalize),
     )
     ema = EMA(student, decay=float(cfg.training.ema_decay))
@@ -477,6 +481,8 @@ def main() -> None:
                 teacher_x0=teacher_x0,
                 gt_x0=gt_x0_rep,
                 pad_mask=pad_mask_rep,
+                observed_motion=observed_motion_rep,
+                motion_mask=motion_mask_rep,
                 teacher_weight=teacher_weight,
                 gt_weight=gt_weight,
             )
@@ -503,6 +509,26 @@ def main() -> None:
             reduced_total = reduce_scalar(loss.detach(), world_size, is_distributed)
             reduced_teacher_total = reduce_scalar(loss_dict["loss_teacher_total"].detach(), world_size, is_distributed)
             reduced_gt_total = reduce_scalar(loss_dict["loss_gt_total"].detach(), world_size, is_distributed)
+            reduced_constraint_total = reduce_scalar(
+                loss_dict["loss_constraint_total"].detach(),
+                world_size,
+                is_distributed,
+            )
+            reduced_constraint_pos = reduce_scalar(
+                loss_dict["loss_constraint_position"].detach(),
+                world_size,
+                is_distributed,
+            )
+            reduced_constraint_rot = reduce_scalar(
+                loss_dict["loss_constraint_rotation"].detach(),
+                world_size,
+                is_distributed,
+            )
+            reduced_constraint_root = reduce_scalar(
+                loss_dict["loss_constraint_root"].detach(),
+                world_size,
+                is_distributed,
+            )
             mean_schedule_idx = reduce_scalar(schedule_idx.float().mean(), world_size, is_distributed)
 
             if is_main_process(rank):
@@ -517,21 +543,30 @@ def main() -> None:
                     "loss_total": float(reduced_total.item()),
                     "loss_teacher_total": float(reduced_teacher_total.item()),
                     "loss_gt_total": float(reduced_gt_total.item()),
+                    "loss_constraint_total": float(reduced_constraint_total.item()),
+                    "loss_constraint_position": float(reduced_constraint_pos.item()),
+                    "loss_constraint_rotation": float(reduced_constraint_rot.item()),
+                    "loss_constraint_root": float(reduced_constraint_root.item()),
                     "teacher_weight": float(loss_dict["teacher_weight"].detach().item()),
                     "gt_weight": float(loss_dict["gt_weight"].detach().item()),
+                    "constraint_loss_weight": float(loss_dict["constraint_loss_weight"].detach().item()),
+                    "constraint_observed_count": float(loss_dict["constraint_observed_count"].detach().item()),
                     "lr": float(optimizer.param_groups[0]["lr"]),
                     "time": time.time(),
                 }
                 log.info(
-                    "step=%d kf=%d loss=%.6f teacher=%.6f gt=%.6f tw=%.3f gw=%.3f "
+                    "step=%d kf=%d loss=%.6f teacher=%.6f gt=%.6f constraint=%.6f "
+                    "tw=%.3f gw=%.3f cw=%.3f "
                     "rollout_bs=%d k=%d eff_bs=%d mean_sched=%.2f lr=%.3e",
                     metric["step"],
                     metric["num_keyframes"],
                     metric["loss_total"],
                     metric["loss_teacher_total"],
                     metric["loss_gt_total"],
+                    metric["loss_constraint_total"],
                     metric["teacher_weight"],
                     metric["gt_weight"],
+                    metric["constraint_loss_weight"],
                     metric["rollout_batch_size"],
                     metric["samples_per_rollout"],
                     metric["effective_supervision_batch"],

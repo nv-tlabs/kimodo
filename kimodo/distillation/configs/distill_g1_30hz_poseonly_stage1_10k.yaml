@@ -1,0 +1,121 @@
+model:
+  num_base_steps: 1000
+
+  teacher_denoiser:
+    _target_: kimodo.model.twostage_denoiser.TwostageDenoiser
+    motion_mask_mode: concat
+    ckpt_path: /mnt/pfs/scalelab/yzh/kimodo_my/huggingface/hub/models--nvidia--Kimodo-G1-RP-v1/snapshots/3020ad8c419c244e0429d360163730c63c4ed011/model.safetensors
+    motion_rep:
+      _target_: kimodo.motion_rep.KimodoMotionRep
+      fps: 30
+      stats_path: /mnt/pfs/scalelab/yzh/kimodo_my/huggingface/hub/models--nvidia--Kimodo-G1-RP-v1/snapshots/3020ad8c419c244e0429d360163730c63c4ed011/stats/motion
+      skeleton:
+        _target_: kimodo.skeleton.G1Skeleton34
+    llm_shape: [1, 4096]
+    use_text_mask: false
+    latent_dim: 1024
+    ff_size: 2048
+    num_layers: 16
+    num_heads: 8
+    activation: gelu
+    dropout: 0.0
+    pe_dropout: 0.0
+    norm_first: false
+    num_text_tokens_override: 50
+    input_first_heading_angle: true
+
+  student_denoiser:
+    _target_: kimodo.model.twostage_denoiser.TwostageDenoiser
+    motion_mask_mode: concat
+    ckpt_path: null
+    motion_rep:
+      _target_: kimodo.motion_rep.KimodoMotionRep
+      fps: 30
+      stats_path: /mnt/pfs/scalelab/yzh/kimodo_my/huggingface/hub/models--nvidia--Kimodo-G1-RP-v1/snapshots/3020ad8c419c244e0429d360163730c63c4ed011/stats/motion
+      skeleton:
+        _target_: kimodo.skeleton.G1Skeleton34
+    llm_shape: [1, 4096]
+    use_text_mask: false
+    latent_dim: 1024
+    ff_size: 2048
+    num_layers: 8
+    num_heads: 8
+    activation: gelu
+    dropout: 0.0
+    pe_dropout: 0.0
+    norm_first: false
+    num_text_tokens_override: 50
+    input_first_heading_angle: true
+
+text_encoder:
+  _target_: kimodo.model.dummy_text_encoder.DummyTextEncoder
+  llm_dim: 4096
+
+data:
+  num_workers: 0
+  pin_memory: true
+  dataset:
+    _target_: kimodo.training.masked_motion_npz.MaskedMotionNPZDataset
+    npz_root: /mnt/pfs/scalelab/swj/kimodo_g1_wrist_dense_root_sparse_norm_full
+    max_frames: 300
+    to_normalize: true
+    text_from: none
+    default_text: ""
+    verify_shapes: true
+
+loss:
+  teacher_weight: 0.7
+  gt_weight: 0.3
+  constraint_loss_weight: 0.25
+  hand_constraint_weight: 1.1
+  foot_constraint_weight: 1.0
+  root_constraint_weight: 0.7
+  weight_schedule:
+    enabled: false
+  teacher_gammas: [10.0, 2.0, 10.0, 3.0, 10.0, 4.0, 5.0]
+  gt_gammas: [10.0, 2.0, 10.0, 3.0, 10.0, 4.0, 5.0]
+
+distillation:
+  teacher_steps: 100
+  student_steps: 20
+  student_init_from_teacher: true
+  student_init_mode: teacher_layer_map
+  teacher_layer_indices_for_student: [0, 2, 4, 6, 8, 10, 12, 14]
+
+phase2:
+  enabled: false
+
+training:
+  seed: 42
+  deterministic: false
+  output_dir: ./outputs/g1_30hz_poseonly_stage1_10k_wristdense_root_sparse_online
+  resume: null
+  total_steps: 10000
+  batch_size: 32
+  optimizer: adam_atan2
+  betas: [0.9, 0.999]
+  lr: 2.0e-5
+  weight_decay: 0.0
+  mixed_precision: fp16
+  gradient_clip: 1.0
+  ema_decay: 0.995
+  ema_every: 10
+  cfg_dropout_text_prob: 0.0
+  cfg_dropout_motion_prob: 0.0
+  log_every: 50
+  save_every: 2500
+  skip_text_encode_errors: false
+  max_text_encode_retries: 0
+  max_checkpoints_to_keep: 5
+
+wandb:
+  enabled: true
+  project: kimodo-g1-distill
+  entity: null
+  name: g1_30hz_poseonly_stage1_10k_wristdense_root_sparse_online
+  group: g1_30hz_poseonly_then_dagger_smoothhand_30k
+  job_type: train
+  tags: [g1, distill, 30hz, stage1, poseonly, no_text, wrist_dense, root_sparse, 100to20]
+  mode: online
+  resume: allow
+  id: null

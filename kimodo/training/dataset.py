@@ -112,6 +112,7 @@ class G1CSVTextDataset(Dataset):
     PAPER_PATTERN_NAMES: tuple[str, ...] = (
         "fullbody_sparse",
         "endeffector_sparse",
+        "fivepoint_dense",
         "root2d_sparse",
         "root2d_dense",
         "foot_contacts_sparse",
@@ -172,7 +173,7 @@ class G1CSVTextDataset(Dataset):
         self.rotate_to_zero_prob = float(rotate_to_zero_prob)
         self.randomize_first_heading_prob = float(randomize_first_heading_prob)
         self.translate_to_zero_prob = float(translate_to_zero_prob)
-        self.text_mode = text_mode
+        self.text_mode = str(text_mode).strip().lower()
         self.rng = random.Random(rng_seed)
         self.skip_bad_samples = bool(skip_bad_samples)
         self.max_bad_sample_retries = max(0, int(max_bad_sample_retries))
@@ -323,6 +324,9 @@ class G1CSVTextDataset(Dataset):
             (text, start_time, end_time) where times are in seconds.
             For overview mode or when no timeline exists, times are None.
         """
+        if self.text_mode in {"none", "empty", "no_text", "notext"}:
+            return "", None, None
+
         if self.timeline_index is None:
             return csv_path.stem, None, None
 
@@ -493,6 +497,17 @@ class G1CSVTextDataset(Dataset):
             pool_weights.pop(pick_idx)
         return selected
 
+    def _dense_frame_indices(self, valid_length: int) -> torch.Tensor:
+        indices = torch.arange(0, valid_length, self.phase2_dense_path_stride, dtype=torch.long)
+        dense_set = set(indices.tolist())
+        if self.phase2_include_first and valid_length > 0:
+            dense_set.add(0)
+        if self.phase2_include_last and valid_length > 1:
+            dense_set.add(valid_length - 1)
+        if not dense_set:
+            return torch.zeros((0,), dtype=torch.long)
+        return torch.tensor(sorted(dense_set), dtype=torch.long)
+
     def _sample_phase2_pattern_names(self) -> list[str]:
         if self.phase2_constraint_policy == "legacy":
             mode = self._sample_constraint_mode()
@@ -569,6 +584,22 @@ class G1CSVTextDataset(Dataset):
             ]
             return constraints, indices
 
+        if pattern_name == "fivepoint_dense":
+            indices = self._dense_frame_indices(valid_length)
+            if indices.numel() == 0:
+                return [], indices
+            constraints = [
+                EndEffectorConstraintSet(
+                    self.motion_rep.skeleton,
+                    frame_indices=indices,
+                    global_joints_positions=posed_joints[indices],
+                    global_joints_rots=global_rot_mats[indices],
+                    smooth_root_2d=smooth_root_pos[indices][:, [0, 2]],
+                    joint_names=list(self.phase2_end_effector_joint_pool),
+                )
+            ]
+            return constraints, indices
+
         if pattern_name == "root2d_sparse":
             indices = self._sample_keyframe_indices(valid_length)
             if indices.numel() == 0:
@@ -584,15 +615,9 @@ class G1CSVTextDataset(Dataset):
             return constraints, indices
 
         if pattern_name == "root2d_dense":
-            indices = torch.arange(0, valid_length, self.phase2_dense_path_stride, dtype=torch.long)
-            dense_set = set(indices.tolist())
-            if self.phase2_include_first and valid_length > 0:
-                dense_set.add(0)
-            if self.phase2_include_last and valid_length > 1:
-                dense_set.add(valid_length - 1)
-            if not dense_set:
-                return [], torch.zeros((0,), dtype=torch.long)
-            indices = torch.tensor(sorted(dense_set), dtype=torch.long)
+            indices = self._dense_frame_indices(valid_length)
+            if indices.numel() == 0:
+                return [], indices
             constraints = [
                 Root2DConstraintSet(
                     self.motion_rep.skeleton,
