@@ -14,6 +14,7 @@ import numpy as np
 import torch
 from tqdm import tqdm
 
+from kimodo.device import resolve_device
 from kimodo.meta import parse_prompts_from_meta
 from kimodo.model.load_model import load_model
 from kimodo.tools import load_json
@@ -62,7 +63,7 @@ def main():
     parser.add_argument(
         "--device",
         default=None,
-        help="Device (default: cuda if available else cpu)",
+        help="Device: auto, mps, cuda, or cpu (default: auto)",
     )
     parser.add_argument(
         "--overwrite",
@@ -80,7 +81,7 @@ def main():
     if not folder.is_dir():
         raise SystemExit(f"Folder does not exist or is not a directory: {folder}")
 
-    device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
+    device = resolve_device(args.device)
     model = load_model(modelname=args.model, device=device, default_family="TMR", text_encoder_fp32=args.text_encoder_fp32)
 
     dirs = discover_motion_folders(folder)

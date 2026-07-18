@@ -1,4 +1,6 @@
 include CMakeLists.txt
-include test_example.py
+include LICENSE
+include ATTRIBUTIONS.MD
+include run_test.py
 recursive-include src *.cpp *.h *.inl
 recursive-include python *.py *.dll

@@ -17,6 +17,15 @@ from .transforms import (
 )
 
 
+def _load_skeleton_tensor(path: Path) -> torch.Tensor:
+    """Load an asset using a dtype supported by every Kimodo accelerator."""
+    tensor = torch.load(path).squeeze()
+    # MPS does not support float64, and Kimodo's model/runtime math is FP32.
+    if tensor.is_floating_point() and tensor.dtype == torch.float64:
+        tensor = tensor.float()
+    return tensor
+
+
 class SkeletonBase(torch.nn.Module):
     """Base class that stores a skeleton hierarchy and helper metadata.
 
@@ -69,21 +78,21 @@ class SkeletonBase(torch.nn.Module):
 
         if load and folder is not None:
             pfolder = Path(folder)
-            neutral_joints = torch.load(pfolder / "joints.p").squeeze()
+            neutral_joints = _load_skeleton_tensor(pfolder / "joints.p")
             self.register_buffer("neutral_joints", neutral_joints, persistent=False)
 
             if (pfolder / "bvh_joints.p").exists():
-                bvh_neutral_joints = torch.load(pfolder / "bvh_joints.p").squeeze()
+                bvh_neutral_joints = _load_skeleton_tensor(pfolder / "bvh_joints.p")
                 self.register_buffer("bvh_neutral_joints", bvh_neutral_joints, persistent=False)
 
             global_offset_path = pfolder / "standard_t_pose_global_offsets_rots.p"
             if global_offset_path.exists():
-                global_rot_offsets = torch.load(global_offset_path).squeeze()
+                global_rot_offsets = _load_skeleton_tensor(global_offset_path)
                 self.register_buffer("global_rot_offsets", global_rot_offsets, persistent=False)
             # Usefull for g1, where the rest pose is not zero
             baked_rest_path = pfolder / "rest_pose_local_rot.p"
             if baked_rest_path.exists():
-                rest_pose_local_rot = torch.load(baked_rest_path).squeeze()
+                rest_pose_local_rot = _load_skeleton_tensor(baked_rest_path)
                 self.register_buffer("rest_pose_local_rot", rest_pose_local_rot, persistent=False)
 
         self.bone_order_names = [x for x, y in self.bone_order_names_with_parents]
