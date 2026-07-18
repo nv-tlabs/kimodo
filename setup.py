@@ -5,6 +5,7 @@ import os
 import shutil
 import subprocess
 import sys
+import sysconfig
 from pathlib import Path
 
 from setuptools import Extension, find_packages, setup
@@ -31,8 +32,18 @@ class CMakeBuild(build_ext):
         extdir = os.path.abspath(os.path.dirname(self.get_ext_fullpath(ext.name)))
         cmake_args = [
             f"-DCMAKE_LIBRARY_OUTPUT_DIRECTORY={extdir}",
-            f"-DPYTHON_EXECUTABLE={sys.executable}",
+            f"-DPython3_EXECUTABLE={sys.executable}",
         ]
+        if sys.platform == "darwin":
+            deployment_target = os.environ.get("MACOSX_DEPLOYMENT_TARGET") or sysconfig.get_config_var(
+                "MACOSX_DEPLOYMENT_TARGET"
+            )
+            if deployment_target:
+                cmake_args.append(f"-DCMAKE_OSX_DEPLOYMENT_TARGET={deployment_target}")
+            archflags = os.environ.get("ARCHFLAGS", "").split()
+            architectures = [archflags[i + 1] for i, token in enumerate(archflags[:-1]) if token == "-arch"]
+            if len(set(architectures)) > 1:
+                cmake_args.append(f"-DCMAKE_OSX_ARCHITECTURES={';'.join(dict.fromkeys(architectures))}")
 
         cfg = "Debug" if self.debug else "Release"
         build_args = ["--config", cfg]

@@ -4,6 +4,8 @@
 
 > Note: This repo was developed and primarily tested on Linux
 
+> Apple Silicon users should follow the native [macOS installation guide](installation_macos.md). Docker Desktop cannot expose Apple's MPS backend.
+
 There are two ways to install Kimodo: (1) as a package, or (2) download the source code and install.
 Both require setting up a Hugging Face token to use the text encoder at generation time.
 
@@ -44,7 +46,7 @@ pip install "kimodo[all] @ git+https://github.com/nv-tlabs/kimodo.git"
 
 Now should be ready to use Kimodo. Check out the [quick start guide](quick_start.md) to see how to generate motions.
 
-If you experience issues with package or system compatibility using the above install strategy, we recommend downloading the codebase and using the Docker install detailed below.
+If you experience package or system compatibility issues, use the source-code route below. Linux users can then choose Docker; Apple Silicon users should use the native macOS guide for MPS acceleration.
 
 ## Kimodo Install Option 2: Source Code Install
 
@@ -64,6 +66,7 @@ Kimodo can be installed by building and running through a virtual environment (e
 :maxdepth: 1
 
 installation_virtual_env
+installation_macos
 installation_docker
 installation_smpl
 ```

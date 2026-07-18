@@ -8,6 +8,8 @@ from typing import Optional
 from huggingface_hub import snapshot_download
 from omegaconf import OmegaConf
 
+from kimodo.device import resolve_device
+
 from .loading import (
     AVAILABLE_MODELS,
     DEFAULT_MODEL,
@@ -65,29 +67,38 @@ def _build_api_text_encoder_conf(text_encoder_url: str) -> dict:
     }
 
 
-def _build_local_text_encoder_conf(text_encoder_fp32: bool = False) -> dict:
+def _build_local_text_encoder_conf(text_encoder_fp32: bool = False, device: Optional[str] = None) -> dict:
     text_encoder_name = get_env_var("TEXT_ENCODER", DEFAULT_TEXT_ENCODER)
     if text_encoder_name not in TEXT_ENCODER_PRESETS:
         available = ", ".join(sorted(TEXT_ENCODER_PRESETS))
         raise ValueError(f"Unknown TEXT_ENCODER='{text_encoder_name}'. Available: {available}")
 
     preset = TEXT_ENCODER_PRESETS[text_encoder_name]
+    kwargs = dict(preset["kwargs"])
     if text_encoder_fp32:
-        preset["kwargs"]["dtype"] = "float32"
+        kwargs["dtype"] = "float32"
+    elif dtype_override := get_env_var("TEXT_ENCODER_DTYPE"):
+        kwargs["dtype"] = dtype_override
+    if device is not None and not get_env_var("TEXT_ENCODER_DEVICE"):
+        kwargs["device"] = device
     return {
         "_target_": preset["target"],
-        **preset["kwargs"],
+        **kwargs,
     }
 
 
-def _select_text_encoder_conf(text_encoder_url: str, text_encoder_fp32: bool = False) -> dict:
+def _select_text_encoder_conf(
+    text_encoder_url: str,
+    text_encoder_fp32: bool = False,
+    device: Optional[str] = None,
+) -> dict:
     # TEXT_ENCODER_MODE options:
     # - "api": force TextEncoderAPI
     # - "local": force local LLM2VecEncoder
     # - "auto": try API first, fallback to local if unreachable
     mode = get_env_var("TEXT_ENCODER_MODE", "auto").lower()
     if mode == "local":
-        return _build_local_text_encoder_conf(text_encoder_fp32)
+        return _build_local_text_encoder_conf(text_encoder_fp32, device)
     if mode == "api":
         return _build_api_text_encoder_conf(text_encoder_url)
 
@@ -102,7 +113,7 @@ def _select_text_encoder_conf(text_encoder_url: str, text_encoder_fp32: bool = F
             "Text encoder service is unreachable, falling back to local LLM2Vec "
             f"encoder. ({type(error).__name__}: {error})"
         )
-        return _build_local_text_encoder_conf(text_encoder_fp32)
+        return _build_local_text_encoder_conf(text_encoder_fp32, device)
 
 
 def load_model(
@@ -124,7 +135,8 @@ def load_model(
         modelname: Model identifier; uses DEFAULT_MODEL if None. Can be a short key,
             a full name (e.g. Kimodo-SOMA-RP-v1), or a partial name; unknown names
             are resolved via resolve_model_name using default_family.
-        device: Target device for the model (e.g. 'cuda', 'cpu').
+        device: Target device for the model (e.g. 'mps', 'cuda', 'cpu', or
+            'auto'). None and 'auto' select the best available accelerator.
         eval_mode: If True, set model to eval mode.
         default_family: Used when modelname is not in AVAILABLE_MODELS to resolve
             partial names ("Kimodo" for demo/generation, "TMR" for embed script).
@@ -134,6 +146,7 @@ def load_model(
         text_encoder: Pre-built text encoder to reuse. When provided, skips
             text encoder selection/instantiation entirely.
         text_encoder_fp32: If True, uses fp32 for the text encoder rather than default bfloat16.
+            The local encoder uses the model device unless TEXT_ENCODER_DEVICE overrides it.
 
     Returns:
         Loaded model in eval mode, or (model, resolved short key) if
@@ -143,6 +156,8 @@ def load_model(
         ValueError: If modelname is not in AVAILABLE_MODELS and cannot be resolved.
         FileNotFoundError: If config.yaml is missing in the checkpoint folder.
     """
+    device = resolve_device(device)
+
     if modelname is None:
         modelname = DEFAULT_MODEL
     if modelname not in AVAILABLE_MODELS:
@@ -191,7 +206,7 @@ def load_model(
         runtime_conf = OmegaConf.create(
             {
                 "checkpoint_dir": str(model_path),
-                "text_encoder": _select_text_encoder_conf(text_encoder_url, text_encoder_fp32),
+                "text_encoder": _select_text_encoder_conf(text_encoder_url, text_encoder_fp32, device),
             }
         )
 

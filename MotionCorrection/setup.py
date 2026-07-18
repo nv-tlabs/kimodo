@@ -8,6 +8,7 @@ import os
 import shutil
 import subprocess
 import sys
+import sysconfig
 from pathlib import Path
 
 from setuptools import Extension, setup
@@ -36,8 +37,18 @@ class CMakeBuild(build_ext):
         extdir = os.path.abspath(os.path.dirname(self.get_ext_fullpath(ext.name)))
         cmake_args = [
             f"-DCMAKE_LIBRARY_OUTPUT_DIRECTORY={extdir}",
-            f"-DPYTHON_EXECUTABLE={sys.executable}",
+            f"-DPython3_EXECUTABLE={sys.executable}",
         ]
+        if sys.platform == "darwin":
+            deployment_target = os.environ.get("MACOSX_DEPLOYMENT_TARGET") or sysconfig.get_config_var(
+                "MACOSX_DEPLOYMENT_TARGET"
+            )
+            if deployment_target:
+                cmake_args.append(f"-DCMAKE_OSX_DEPLOYMENT_TARGET={deployment_target}")
+            archflags = os.environ.get("ARCHFLAGS", "").split()
+            architectures = [archflags[i + 1] for i, token in enumerate(archflags[:-1]) if token == "-arch"]
+            if len(set(architectures)) > 1:
+                cmake_args.append(f"-DCMAKE_OSX_ARCHITECTURES={';'.join(dict.fromkeys(architectures))}")
 
         cfg = "Debug" if self.debug else "Release"
         build_args = ["--config", cfg]
@@ -106,17 +117,16 @@ setup(
     name="motion_correction",
     version="1.0.0",
     author="NVIDIA",
-    description="Standalone correct_motion function",
+    description="Standalone Kimodo motion correction extension",
     long_description="",
     packages=["motion_correction"],
     package_dir={"": "python"},
     ext_modules=[CMakeExtension("motion_correction._motion_correction")],
     cmdclass={"build_ext": CMakeBuild},
     zip_safe=False,
-    python_requires=">=3.8",
+    python_requires=">=3.10,<3.13",
     install_requires=[
-        "torch>=1.10.0",
-        "numpy>=1.19.0",
-        # 'cmake' # can install this via pip if the windows system does not have it. But need to run this by yourself before build, not in here.
+        "torch>=2.0",
+        "numpy>=1.23,<2",
     ],
 )

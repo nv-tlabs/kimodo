@@ -19,6 +19,7 @@ import torch
 from tqdm import tqdm
 
 from kimodo.constraints import load_constraints_lst
+from kimodo.device import resolve_device
 from kimodo.meta import parse_prompts_from_meta
 from kimodo.metrics import (
     ContraintFollow,
@@ -265,14 +266,14 @@ def main():
         type=Path,
         help="Root folder to search recursively for meta.json + motion.npz + gt_motion.npz",
     )
-    parser.add_argument("--device", default=None, help="cuda/cpu. Default: auto")
+    parser.add_argument("--device", default=None, help="auto/mps/cuda/cpu. Default: auto")
     args = parser.parse_args()
 
     folder = args.folder.resolve()
     if not folder.is_dir():
         raise SystemExit(f"Folder does not exist: {folder}")
 
-    device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
+    device = resolve_device(args.device)
 
     examples = discover_motion_folders(folder)
     if not examples:

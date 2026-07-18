@@ -71,7 +71,8 @@ Please see the full documentation for detailed installation instructions, how to
 Some notes on installation environment:
 - Kimodo requires ~17GB of VRAM to generate locally entirely on GPU, primarily due to the text embedding model. If you have a smaller card, set `TEXT_ENCODER_DEVICE=cpu` when running Kimodo commands to force text encoding to the CPU. This is slightly slower but reduces VRAM usage to <3 GB.
 - The model has been most extensively tested on GeForce RTX 3090, GeForce RTX 4090, and NVIDIA A100 GPUs, but should work on other recent cards with sufficient VRAM
-- This repo was developed on Linux, though Windows should work especially if using Docker
+- Apple Silicon Macs use PyTorch MPS acceleration automatically. See the [M1-M4 installation guide](docs/source/getting_started/installation_macos.md) for the native ARM64 build and recommended runtime settings.
+- This repo was developed on Linux, though macOS is supported natively and Windows should work especially if using Docker
 
 ## Interactive Motion Authoring Demo
 
@@ -113,6 +114,7 @@ Motions can also be generated directly from the command line with the `kimodo_ge
 - `--num_samples`: Number of motion variations to generate
 - `--constraints`: Constraint file to control the generated motion (e.g., saved from the web demo)
 - `--diffusion_steps`: Number of denoising steps
+- `--device`: Compute device (`auto`, `mps`, `cuda`, or `cpu`)
 - `--cfg_type` / `--cfg_weight`: Classifier-free guidance (`nocfg`, `regular` with one weight, or `separated` with two weights for text vs. constraints); see the [CLI docs](https://research.nvidia.com/labs/sil/projects/kimodo/docs/user_guide/cli.html#classifier-free-guidance-cfg)
 - `--no-postprocess`: Flag to disable foot skate and constraint cleanup post-processing
 - `--seed`: Random seed for reproducible results

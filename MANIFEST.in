@@ -3,4 +3,5 @@ recursive-include kimodo/assets *
 recursive-include MotionCorrection/src *.cpp *.h *.inl
 recursive-include MotionCorrection/python *.py *.dll
 include MotionCorrection/CMakeLists.txt
-include MotionCorrection/test_example.py
+include MotionCorrection/run_test.py
+recursive-include tests *.py *.b64

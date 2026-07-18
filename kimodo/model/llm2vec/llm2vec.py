@@ -38,7 +38,6 @@
 import json
 import logging
 import os
-from functools import partial
 from typing import Dict, List, Optional, Union
 
 import numpy as np
@@ -57,6 +56,8 @@ from transformers import (
     PretrainedConfig,
     Qwen2Config,
 )
+
+from kimodo.device import resolve_device
 
 logger = logging.getLogger(__name__)
 
@@ -261,8 +262,8 @@ class LLM2Vec(nn.Module):
                 dim=0,
             )
         elif self.pooling_mode == "weighted_mean":
-            bs, l, _ = last_hidden_states.shape
-            complete_weights = torch.zeros(bs, l, device=last_hidden_states.device)
+            bs, sequence_length, _ = last_hidden_states.shape
+            complete_weights = torch.zeros(bs, sequence_length, device=last_hidden_states.device)
             for i, seq_l in enumerate(seq_lengths):
                 if seq_l > 0:
                     complete_weights[i, -seq_l:] = torch.arange(seq_l) + 1
@@ -320,8 +321,8 @@ class LLM2Vec(nn.Module):
             convert_to_numpy: If true, return numpy arrays instead of torch tensors.
             convert_to_tensor: If true, return torch tensors (default).
             device: torch backend device identifier (e.g., 'cuda', 'cpu','mps' etc.). If not specified,
-            the default is to use cuda when available, otherwise cpu. Note that only the choice of 'cuda' supports
-            multiprocessing as currently implemented.
+            the default preference is CUDA, then Apple MPS, then CPU. Note that only the choice of 'cuda'
+            supports multiprocessing as currently implemented.
 
         Returns: embeddings of the sentences. Embeddings are detached and always on the CPU (see _encode implementation).
 
@@ -333,7 +334,7 @@ class LLM2Vec(nn.Module):
             sentences = [[""] + [sentence] for sentence in sentences]
 
         if device is None:
-            device = "cuda" if torch.cuda.is_available() else "cpu"
+            device = resolve_device("auto")
 
         concatenated_input_texts = []
         for sentence in sentences:
