@@ -114,9 +114,19 @@ class CMakeBuild(build_ext):
 
 
 setup(
+    name="motion_correction",
+    version="1.0.0",
+    author="NVIDIA",
+    description="Standalone Kimodo motion correction extension",
+    long_description="",
     packages=["motion_correction"],
     package_dir={"": "python"},
     ext_modules=[CMakeExtension("motion_correction._motion_correction")],
     cmdclass={"build_ext": CMakeBuild},
     zip_safe=False,
+    python_requires=">=3.10,<3.13",
+    install_requires=[
+        "torch>=2.0",
+        "numpy>=1.23,<2",
+    ],
 )
