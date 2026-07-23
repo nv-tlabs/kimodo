@@ -1,0 +1,541 @@
+diff --git a/README.md b/README.md
+index d908a43..d3b38a2 100644
+--- a/README.md
++++ b/README.md
+@@ -24,7 +24,9 @@ scrubber, speed control, loop, and a root-trajectory trail).
+ - **Human rig:** `nvidia/ARDY-Core-RP-20FPS-Horizon40` — 27-joint "Core" skeleton at 20 fps.
+ - **Robot rig:** `nvidia/ARDY-G1-RP-25FPS-Horizon52` — 34-joint Unitree G1 humanoid robot at 25 fps
+   (same rig as the sibling Space `hugging-apps/ardy-g1-motion-generation`).
+-- **Text encoder:** LLM2Vec-Llama-3-8B (gated base weights pulled via the Space `HF_TOKEN` secret).
++- **Text encoder:** LLM2Vec-Llama-3-8B using the public
++  `unsloth/llama-3-8b-Instruct` base plus the original McGill MNTP and supervised
++  adapters. No Meta-gated base-model access is required.
+ - **Hardware:** ZeroGPU.
+ 
+ Post-processing (foot-skate cleanup, which needs a compiled C++ extension) is disabled in this
+@@ -32,3 +34,19 @@ demo; generation uses the model's autoregressive path directly.
+ 
+ Based on the [nv-tlabs/ardy](https://github.com/nv-tlabs/ardy) reference implementation
+ (`scripts/generate.py`).
++
++## Blender export
++
++Open **Blender export** to generate three downloadable files:
++
++- `ardy_motion.bvh` — directly importable with Blender's BVH importer.
++- `ardy_motion.npz` — complete ARDY output including joint positions, local and
++  global rotations, root trajectory, and foot contacts.
++- `metadata.json` — prompt, seed, FPS, skeleton hierarchy, and coordinate-system
++  information.
++
++The programmatic endpoint is `/generate_blender`. The existing `/generate`
++endpoint and Three.js playground remain available.
++
++The base and adapter repositories can be overridden with the Space variables
++`LLM2VEC_BASE_MODEL`, `LLM2VEC_MNTP_MODEL`, and `LLM2VEC_SUPERVISED_MODEL`.
+diff --git a/app.py b/app.py
+index 6faa77c..b60e0af 100644
+--- a/app.py
++++ b/app.py
+@@ -9,6 +9,7 @@ import gzip
+ import json
+ import random
+ import sys
++import tempfile
+ import time
+ import xml.etree.ElementTree as ET
+ from pathlib import Path
+@@ -23,6 +24,7 @@ import gradio as gr
+ sys.path.insert(0, str(Path(__file__).resolve().parent))
+ 
+ from ardy.model import load_model  # noqa: E402
++from ardy.exports import write_bvh  # noqa: E402
+ from ardy.model.load_model import load_text_encoder  # noqa: E402
+ from ardy.motion_rep.tools import length_to_mask  # noqa: E402
+ from ardy.tools import seed_everything, to_numpy  # noqa: E402
+@@ -402,16 +404,25 @@ def _generate_sequence(rig_key, prompt, num_new_frames, steps, cfg_weight, init_
+     return motion_tensor
+ 
+ 
++def _decode_motion(rig_key, motion_tensor):
++    r = RIGS[rig_key]
++    model = r["model"]
++    with torch.no_grad():
++        out = to_numpy(model.motion_rep.inverse(motion_tensor, is_normalized=True))
++    return {
++        key: np.asarray(value)[0]
++        for key, value in out.items()
++    }
++
++
+ def _pack_payload(rig_key, motion_tensor, prompt, seed):
+     """Decode a normalized feature tensor to the browser payload (per-frame joint
+     affines + root ground-track), tagged with the rig so the viewer loads the
+     correct skeleton/model."""
+     r = RIGS[rig_key]
+-    model = r["model"]
+-    with torch.no_grad():
+-        out = to_numpy(model.motion_rep.inverse(motion_tensor, is_normalized=True))
+-    posed = np.asarray(out["posed_joints"])[0]      # [T, J, 3] global joint positions
+-    grm = np.asarray(out["global_rot_mats"])[0]      # [T, J, 3, 3] global rotations
++    out = _decode_motion(rig_key, motion_tensor)
++    posed = out["posed_joints"]      # [T, J, 3] global joint positions
++    grm = out["global_rot_mats"]     # [T, J, 3, 3] global rotations
+     if rig_key == "robot":
+         affines = _joint_transforms_robot(grm, posed)
+     else:
+@@ -490,6 +501,81 @@ def generate_motion(prompt: str, rig: str = DEFAULT_RIG, duration: float = 5.0,
+     return payload_json, seed
+ 
+ 
++@spaces.GPU
++def generate_blender_motion(
++    prompt: str,
++    duration: float = 5.0,
++    diffusion_steps: int = NUM_BASE_STEPS,
++    cfg_weight: float = 2.0,
++    seed: int = 0,
++    randomize_seed: bool = True,
++) -> tuple[str, str, str, int]:
++    """Generate a human motion and return BVH, NPZ, and JSON metadata files."""
++    _, seed, motion_np = _core_generate(
++        "human",
++        prompt,
++        duration,
++        diffusion_steps,
++        cfg_weight,
++        seed,
++        randomize_seed,
++        None,
++    )
++    motion_tensor = torch.from_numpy(motion_np).to("cuda")
++    out = _decode_motion("human", motion_tensor)
++    r = RIGS["human"]
++    skeleton = r["skeleton"]
++    joint_names = list(skeleton.bone_order_names)
++    parents = list(r["parents"])
++    rest_positions = to_numpy(skeleton.neutral_joints)
++
++    output_dir = Path(tempfile.mkdtemp(prefix="ardy_blender_"))
++    npz_path = output_dir / "ardy_motion.npz"
++    bvh_path = output_dir / "ardy_motion.bvh"
++    metadata_path = output_dir / "metadata.json"
++
++    np.savez_compressed(
++        npz_path,
++        **out,
++        fps=np.asarray(r["fps"], dtype=np.float32),
++        text=np.asarray(prompt),
++        seed=np.asarray(seed, dtype=np.int64),
++        rig=np.asarray("human"),
++        joint_names=np.asarray(joint_names),
++        parents=np.asarray(parents, dtype=np.int32),
++        rest_positions=np.asarray(rest_positions, dtype=np.float32),
++    )
++    write_bvh(
++        bvh_path,
++        joint_names=joint_names,
++        parents=parents,
++        rest_positions=rest_positions,
++        local_rot_mats=out["local_rot_mats"],
++        root_positions=out["root_positions"],
++        fps=r["fps"],
++    )
++    metadata_path.write_text(
++        json.dumps(
++            {
++                "model": "nvidia/ARDY-Core-RP-20FPS-Horizon40",
++                "rig": "human",
++                "prompt": prompt,
++                "seed": seed,
++                "fps": r["fps"],
++                "frames": int(out["posed_joints"].shape[0]),
++                "joints": joint_names,
++                "parents": parents,
++                "coordinate_system": "Y-up, metric",
++                "post_processing": False,
++            },
++            ensure_ascii=False,
++            indent=2,
++        ),
++        encoding="utf-8",
++    )
++    return str(bvh_path), str(npz_path), str(metadata_path), seed
++
++
+ # -----------------------------------------------------------------------------
+ # Front-end: a self-contained Three.js playground, delivered as a Gradio-native
+ # custom HTML component (Gradio 6 `gr.HTML` templates + js_on_load).
+@@ -963,6 +1049,17 @@ with gr.Blocks() as demo:
+                 randomize_seed = gr.Checkbox(label="Randomize seed", value=True)
+                 seed = gr.Number(label="Seed", value=0, precision=0)
+ 
++        with gr.Accordion("Blender export", open=False):
++            gr.Markdown(
++                "Generate the human rig as **BVH**, full-fidelity **NPZ**, and "
++                "JSON metadata. Import the BVH directly in Blender."
++            )
++            export_blender = gr.Button("Generate Blender files", variant="secondary")
++            with gr.Row():
++                bvh_file = gr.File(label="Blender BVH")
++                npz_file = gr.File(label="ARDY NPZ")
++                metadata_file = gr.File(label="Metadata")
++
+         gr.Examples(
+             examples=EXAMPLES,
+             inputs=[prompt, rig, duration],
+@@ -991,9 +1088,16 @@ with gr.Blocks() as demo:
+               outputs=[player, seed, seq_state], api_name=False)
+     cont.click(fn=ui_continue, inputs=_gen_inputs + [seq_state],
+                outputs=[player, seed, seq_state], api_name=False)
++    export_blender.click(
++        fn=generate_blender_motion,
++        inputs=[prompt, duration, diffusion_steps, cfg_weight, seed, randomize_seed],
++        outputs=[bvh_file, npz_file, metadata_file, seed],
++        api_name=False,
++    )
+ 
+     # Clean single-shot endpoint for the HTTP API / MCP tool (no session state).
+     gr.api(generate_motion, api_name="generate")
++    gr.api(generate_blender_motion, api_name="generate_blender")
+ 
+ demo.queue()
+ 
+diff --git a/ardy/exports/__init__.py b/ardy/exports/__init__.py
+index 9e97408..21558f4 100644
+--- a/ardy/exports/__init__.py
++++ b/ardy/exports/__init__.py
+@@ -1,3 +1,7 @@
+ # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ # SPDX-License-Identifier: Apache-2.0
+-"""Exporters for external motion formats (e.g. MuJoCo qpos CSV)."""
++"""Exporters for external motion formats (e.g. BVH and MuJoCo qpos CSV)."""
++
++from .bvh import write_bvh
++
++__all__ = ["write_bvh"]
+diff --git a/ardy/exports/bvh.py b/ardy/exports/bvh.py
+new file mode 100644
+index 0000000..99b7a5d
+--- /dev/null
++++ b/ardy/exports/bvh.py
+@@ -0,0 +1,141 @@
++# SPDX-FileCopyrightText: Copyright (c) 2026
++# SPDX-License-Identifier: Apache-2.0
++"""Small, dependency-light BVH exporter for ARDY motion outputs."""
++
++from __future__ import annotations
++
++from pathlib import Path
++from typing import Sequence
++
++import numpy as np
++from scipy.spatial.transform import Rotation
++
++
++def _children_from_parents(parents: Sequence[int]) -> list[list[int]]:
++    children = [[] for _ in parents]
++    roots = []
++    for joint, parent in enumerate(parents):
++        if parent < 0:
++            roots.append(joint)
++        else:
++            children[parent].append(joint)
++    if len(roots) != 1:
++        raise ValueError(f"BVH requires exactly one root joint; found {len(roots)}")
++    return children
++
++
++def _joint_offsets(rest_positions: np.ndarray, parents: Sequence[int]) -> np.ndarray:
++    offsets = np.asarray(rest_positions, dtype=np.float64).copy()
++    for joint, parent in enumerate(parents):
++        if parent < 0:
++            offsets[joint] = 0.0
++        else:
++            offsets[joint] -= rest_positions[parent]
++    return offsets
++
++
++def _leaf_offset(joint: int, offsets: np.ndarray, parents: Sequence[int]) -> np.ndarray:
++    direction = offsets[joint]
++    if np.linalg.norm(direction) < 1e-8:
++        parent = parents[joint]
++        direction = offsets[parent] if parent >= 0 else np.array([0.0, 0.05, 0.0])
++    norm = np.linalg.norm(direction)
++    if norm < 1e-8:
++        return np.array([0.0, 0.05, 0.0])
++    return direction / norm * 0.05
++
++
++def _fmt_vec(values: np.ndarray) -> str:
++    return " ".join(f"{float(value):.7f}" for value in values)
++
++
++def write_bvh(
++    path: str | Path,
++    *,
++    joint_names: Sequence[str],
++    parents: Sequence[int],
++    rest_positions: np.ndarray,
++    local_rot_mats: np.ndarray,
++    root_positions: np.ndarray,
++    fps: float,
++) -> Path:
++    """Write local joint rotations and root translation to a Blender-readable BVH.
++
++    ARDY uses a Y-up metric coordinate system. The exported BVH preserves those
++    units and uses Z-X-Y Euler channels, which Blender's BVH importer supports.
++    """
++    path = Path(path)
++    names = [str(name).replace(" ", "_") for name in joint_names]
++    parents = [int(parent) for parent in parents]
++    rotations = np.asarray(local_rot_mats, dtype=np.float64)
++    roots = np.asarray(root_positions, dtype=np.float64)
++    rest = np.asarray(rest_positions, dtype=np.float64)
++
++    joint_count = len(names)
++    if rotations.ndim != 4 or rotations.shape[1:] != (joint_count, 3, 3):
++        raise ValueError(
++            "local_rot_mats must have shape [frames, joints, 3, 3]; "
++            f"received {rotations.shape}"
++        )
++    if roots.shape != (rotations.shape[0], 3):
++        raise ValueError(f"root_positions must have shape [frames, 3]; received {roots.shape}")
++    if rest.shape != (joint_count, 3):
++        raise ValueError(f"rest_positions must have shape [joints, 3]; received {rest.shape}")
++    if fps <= 0:
++        raise ValueError("fps must be greater than zero")
++
++    children = _children_from_parents(parents)
++    root = parents.index(-1)
++    offsets = _joint_offsets(rest, parents)
++    channel_order: list[int] = []
++    lines = ["HIERARCHY"]
++
++    def add_joint(joint: int, depth: int, is_root: bool = False) -> None:
++        indent = "  " * depth
++        label = "ROOT" if is_root else "JOINT"
++        lines.append(f"{indent}{label} {names[joint]}")
++        lines.append(f"{indent}{{")
++        lines.append(f"{indent}  OFFSET {_fmt_vec(offsets[joint])}")
++        if is_root:
++            lines.append(
++                f"{indent}  CHANNELS 6 Xposition Yposition Zposition "
++                "Zrotation Xrotation Yrotation"
++            )
++        else:
++            lines.append(f"{indent}  CHANNELS 3 Zrotation Xrotation Yrotation")
++        channel_order.append(joint)
++        for child in children[joint]:
++            add_joint(child, depth + 1)
++        if not children[joint]:
++            lines.append(f"{indent}  End Site")
++            lines.append(f"{indent}  {{")
++            lines.append(f"{indent}    OFFSET {_fmt_vec(_leaf_offset(joint, offsets, parents))}")
++            lines.append(f"{indent}  }}")
++        lines.append(f"{indent}}}")
++
++    add_joint(root, 0, is_root=True)
++    lines.extend(
++        [
++            "MOTION",
++            f"Frames: {rotations.shape[0]}",
++            f"Frame Time: {1.0 / float(fps):.9f}",
++        ]
++    )
++
++    # scipy uses intrinsic rotations for uppercase sequences, matching BVH's
++    # channel interpretation.
++    eulers = Rotation.from_matrix(rotations.reshape(-1, 3, 3)).as_euler(
++        "ZXY", degrees=True
++    )
++    eulers = eulers.reshape(rotations.shape[0], joint_count, 3)
++    for frame in range(rotations.shape[0]):
++        values: list[float] = []
++        for index, joint in enumerate(channel_order):
++            if index == 0:
++                values.extend(roots[frame].tolist())
++            values.extend(eulers[frame, joint].tolist())
++        lines.append(" ".join(f"{value:.7f}" for value in values))
++
++    path.parent.mkdir(parents=True, exist_ok=True)
++    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
++    return path
+diff --git a/ardy/model/llm2vec/llm2vec.py b/ardy/model/llm2vec/llm2vec.py
+index 3becfa4..3fa009a 100644
+--- a/ardy/model/llm2vec/llm2vec.py
++++ b/ardy/model/llm2vec/llm2vec.py
+@@ -71,6 +71,7 @@ class LLM2Vec(nn.Module):
+         self,
+         model: AutoModel,
+         tokenizer: AutoTokenizer,
++        prompt_model_family: Optional[str] = None,
+         pooling_mode: str = "mean",
+         max_length: int = 512,
+         doc_max_length: int = 400,
+@@ -79,6 +80,7 @@ class LLM2Vec(nn.Module):
+         super().__init__()
+         self.model = model
+         self.tokenizer = tokenizer
++        self.prompt_model_family = prompt_model_family
+         self.pooling_mode = pooling_mode
+         self.skip_instruction = skip_instruction
+         self.max_length = max_length
+@@ -112,7 +114,9 @@ class LLM2Vec(nn.Module):
+     def from_pretrained(
+         cls,
+         base_model_name_or_path,
++        mntp_model_name_or_path=None,
+         peft_model_name_or_path=None,
++        prompt_model_family=None,
+         merge_peft=False,
+         enable_bidirectional=True,
+         **kwargs,
+@@ -146,6 +150,13 @@ class LLM2Vec(nn.Module):
+             )
+             model = model.merge_and_unload()
+ 
++        if mntp_model_name_or_path is not None:
++            model = PeftModel.from_pretrained(
++                model,
++                mntp_model_name_or_path,
++            )
++            model = model.merge_and_unload()
++
+         if peft_model_name_or_path is not None:
+             model = PeftModel.from_pretrained(
+                 model,
+@@ -164,10 +175,18 @@ class LLM2Vec(nn.Module):
+         for key, value in encoder_args.items():
+             config[key] = value
+ 
+-        return cls(model=model, tokenizer=tokenizer, **config)
++        return cls(
++            model=model,
++            tokenizer=tokenizer,
++            prompt_model_family=prompt_model_family,
++            **config,
++        )
+ 
+     def prepare_for_tokenization(self, text):
+-        if self.model.config._name_or_path == "meta-llama/Meta-Llama-3-8B-Instruct":
++        if (
++            self.prompt_model_family == "llama3-instruct"
++            or self.model.config._name_or_path == "meta-llama/Meta-Llama-3-8B-Instruct"
++        ):
+             text = "<|start_header_id|>user<|end_header_id|>\n\n" + text.strip() + "<|eot_id|>"
+             return text
+         if self.model.config._name_or_path in [
+diff --git a/ardy/model/llm2vec/llm2vec_wrapper.py b/ardy/model/llm2vec/llm2vec_wrapper.py
+index 639d1b0..c4a82d2 100644
+--- a/ardy/model/llm2vec/llm2vec_wrapper.py
++++ b/ardy/model/llm2vec/llm2vec_wrapper.py
+@@ -20,6 +20,8 @@ class LLM2VecEncoder:
+         dtype: str,
+         llm_dim: int,
+         device: str = "auto",
++        mntp_model_name_or_path: str | None = None,
++        prompt_model_family: str | None = None,
+     ) -> None:
+         torch_dtype = getattr(torch, dtype)
+         self.llm_dim = llm_dim
+@@ -28,11 +30,18 @@ class LLM2VecEncoder:
+ 
+         if "TEXT_ENCODERS_DIR" in os.environ:
+             base_model_name_or_path = os.path.join(os.environ["TEXT_ENCODERS_DIR"], base_model_name_or_path)
++            if mntp_model_name_or_path is not None:
++                mntp_model_name_or_path = os.path.join(
++                    os.environ["TEXT_ENCODERS_DIR"],
++                    mntp_model_name_or_path,
++                )
+             peft_model_name_or_path = os.path.join(os.environ["TEXT_ENCODERS_DIR"], peft_model_name_or_path)
+ 
+         self.model = LLM2Vec.from_pretrained(
+             base_model_name_or_path=base_model_name_or_path,
++            mntp_model_name_or_path=mntp_model_name_or_path,
+             peft_model_name_or_path=peft_model_name_or_path,
++            prompt_model_family=prompt_model_family,
+             torch_dtype=torch_dtype,
+             cache_dir=cache_dir,
+         )
+diff --git a/ardy/model/load_model.py b/ardy/model/load_model.py
+index e513936..9c4c7ae 100644
+--- a/ardy/model/load_model.py
++++ b/ardy/model/load_model.py
+@@ -22,8 +22,22 @@ TEXT_ENCODER_PRESETS = {
+     "llm2vec": {
+         "target": "ardy.model.LLM2VecEncoder",
+         "kwargs": {
+-            "base_model_name_or_path": "McGill-NLP/LLM2Vec-Meta-Llama-3-8B-Instruct-mntp",
+-            "peft_model_name_or_path": "McGill-NLP/LLM2Vec-Meta-Llama-3-8B-Instruct-mntp-supervised",
++            # The original McGill adapter points at Meta's gated repository.
++            # Load the same Llama 3.0 architecture from an ungated mirror, then
++            # apply the original MNTP and supervised adapters explicitly.
++            "base_model_name_or_path": get_env_var(
++                "LLM2VEC_BASE_MODEL",
++                "unsloth/llama-3-8b-Instruct",
++            ),
++            "mntp_model_name_or_path": get_env_var(
++                "LLM2VEC_MNTP_MODEL",
++                "McGill-NLP/LLM2Vec-Meta-Llama-3-8B-Instruct-mntp",
++            ),
++            "peft_model_name_or_path": get_env_var(
++                "LLM2VEC_SUPERVISED_MODEL",
++                "McGill-NLP/LLM2Vec-Meta-Llama-3-8B-Instruct-mntp-supervised",
++            ),
++            "prompt_model_family": "llama3-instruct",
+             "dtype": "bfloat16",
+             "llm_dim": 4096,
+             "device": "auto",
+diff --git a/tests/test_bvh.py b/tests/test_bvh.py
+new file mode 100644
+index 0000000..b1cdb87
+--- /dev/null
++++ b/tests/test_bvh.py
+@@ -0,0 +1,46 @@
++import tempfile
++import unittest
++from pathlib import Path
++
++import numpy as np
++
++from ardy.exports.bvh import write_bvh
++
++
++class BvhExportTests(unittest.TestCase):
++    def test_writes_blender_readable_hierarchy_and_motion(self):
++        rotations = np.repeat(np.eye(3)[None, None], 4, axis=0)
++        rotations = np.repeat(rotations, 2, axis=1)
++        roots = np.array(
++            [
++                [0.0, 0.0, 0.0],
++                [0.1, 0.0, 0.0],
++                [0.2, 0.0, 0.0],
++                [0.3, 0.0, 0.0],
++            ]
++        )
++
++        with tempfile.TemporaryDirectory() as folder:
++            output = Path(folder) / "motion.bvh"
++            write_bvh(
++                output,
++                joint_names=["Hips", "Spine"],
++                parents=[-1, 0],
++                rest_positions=np.array([[0.0, 0.0, 0.0], [0.0, 0.5, 0.0]]),
++                local_rot_mats=rotations,
++                root_positions=roots,
++                fps=20,
++            )
++            text = output.read_text(encoding="utf-8")
++
++        self.assertIn("ROOT Hips", text)
++        self.assertIn("JOINT Spine", text)
++        self.assertIn("Frames: 4", text)
++        self.assertIn("Frame Time: 0.050000000", text)
++        motion_lines = text.split("Frame Time: 0.050000000\n", 1)[1].strip().splitlines()
++        self.assertEqual(len(motion_lines), 4)
++        self.assertTrue(motion_lines[-1].startswith("0.3000000 0.0000000 0.0000000"))
++
++
++if __name__ == "__main__":
++    unittest.main()
