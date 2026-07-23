@@ -1,0 +1,99 @@
+name: Deploy ARDY ZeroGPU Space
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - deploy/ardy-zero-gpu
+    paths:
+      - ardy_deploy/**
+      - .github/workflows/deploy-ardy-space.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-ardy-zero-gpu
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out deployment branch
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Hugging Face Hub client
+        run: python -m pip install --upgrade "huggingface_hub>=1.0"
+
+      - name: Build and deploy ARDY Space
+        env:
+          HF_TOKEN: \${{ secrets.HF_TOKEN }}
+        run: |
+          python - <<'PY'
+          import os
+          import shutil
+          import subprocess
+          import tempfile
+          from pathlib import Path
+
+          from huggingface_hub import HfApi
+
+          root = Path.cwd()
+          build_dir = Path(tempfile.mkdtemp(prefix="ardy-space-"))
+          source_dir = build_dir / "space"
+
+          subprocess.run(
+              [
+                  "git",
+                  "clone",
+                  "--depth",
+                  "1",
+                  "https://huggingface.co/spaces/hugging-apps/ardy",
+                  str(source_dir),
+              ],
+              check=True,
+          )
+          subprocess.run(
+              [
+                  "git",
+                  "-C",
+                  str(source_dir),
+                  "apply",
+                  str(root / "ardy_deploy" / "ardy-space.patch"),
+              ],
+              check=True,
+          )
+          shutil.rmtree(source_dir / ".git", ignore_errors=True)
+
+          token = os.environ["HF_TOKEN"]
+          api = HfApi(token=token)
+          username = api.whoami()["name"]
+          repo_id = f"{username}/ardy-motion-api"
+
+          api.create_repo(
+              repo_id=repo_id,
+              repo_type="space",
+              space_sdk="gradio",
+              exist_ok=True,
+          )
+          api.add_space_secret(repo_id=repo_id, key="HF_TOKEN", value=token)
+          api.upload_folder(
+              repo_id=repo_id,
+              repo_type="space",
+              folder_path=str(source_dir),
+              ignore_patterns=[
+                  ".git/**",
+                  "**/__pycache__/**",
+                  "**/*.pyc",
+              ],
+              commit_message="Deploy ARDY ZeroGPU Blender motion API",
+          )
+          api.request_space_hardware(repo_id=repo_id, hardware="zero-a10g")
+          print(f"Space deployed to https://huggingface.co/spaces/{repo_id}")
+          PY
