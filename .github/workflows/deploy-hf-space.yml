@@ -1,0 +1,75 @@
+name: Deploy Hugging Face Space
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - feat/hf-zerogpu-motion-api
+    paths:
+      - app.py
+      - requirements.txt
+      - space_utils.py
+      - kimodo/**
+      - .github/workflows/deploy-hf-space.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-hf-space
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    if: ${{ secrets.HF_TOKEN != '' }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Hugging Face Hub client
+        run: python -m pip install --upgrade "huggingface_hub>=1.0"
+
+      - name: Create and deploy ZeroGPU Space
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_SPACE_ID: ${{ vars.HF_SPACE_ID }}
+        run: |
+          python - <<'PY'
+          import os
+
+          from huggingface_hub import HfApi
+
+          token = os.environ["HF_TOKEN"]
+          api = HfApi(token=token)
+          username = api.whoami()["name"]
+          repo_id = os.environ.get("HF_SPACE_ID") or f"{username}/kimodo-motion-api"
+
+          api.create_repo(
+              repo_id=repo_id,
+              repo_type="space",
+              space_sdk="gradio",
+              exist_ok=True,
+          )
+          api.add_space_secret(repo_id=repo_id, key="HF_TOKEN", value=token)
+          api.upload_folder(
+              repo_id=repo_id,
+              repo_type="space",
+              folder_path=".",
+              ignore_patterns=[
+                  ".git/**",
+                  ".github/**",
+                  "**/__pycache__/**",
+                  "**/*.pyc",
+              ],
+              commit_message="Deploy Kimodo ZeroGPU motion API",
+          )
+          api.request_space_hardware(repo_id=repo_id, hardware="zero-a10g")
+          print(f"Space deployed to https://huggingface.co/spaces/{repo_id}")
+          PY

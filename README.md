@@ -1,3 +1,16 @@
+---
+title: Kimodo Motion API
+emoji: 💃
+colorFrom: green
+colorTo: blue
+sdk: gradio
+sdk_version: 6.20.0
+app_file: app.py
+python_version: "3.12"
+startup_duration_timeout: 1h
+short_description: Text-to-motion BVH generation for Blender
+---
+
 <p align="center">
   <img src="./assets/banner.png" alt="Banner" width="100%">
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache%202.0-76B900.svg" alt="License"></a>
@@ -14,6 +27,18 @@ This repository provides:
 - **Interactive Demo**: easily author motions with a timeline interface of text prompts and kinematic controls
 - **Benchmark**: [test cases](https://huggingface.co/datasets/nvidia/Kimodo-Motion-Gen-Benchmark) and evaluation code built on the [BONES-SEED](https://huggingface.co/datasets/bones-studio/seed) dataset to evaluate motion generation models based on text and constraint-following abilities
 - **Annotations**: fine-grained temporal text descriptions created for the Kimodo project are included in the [BONES-SEED](https://huggingface.co/datasets/bones-studio/seed) dataset. For more information on these labels, see our separate [Hugging Face repo](https://huggingface.co/datasets/nvidia/SEED-Timeline-Annotations).
+
+### ZeroGPU motion API
+
+This fork includes a lightweight Hugging Face Gradio app in `app.py`. It exposes a
+`/generate_motion` endpoint that generates one SOMA motion and returns Blender-compatible
+BVH, Kimodo NPZ, and JSON metadata. The endpoint is designed for ZeroGPU and deliberately
+disables the optional native motion-correction pass so the Space does not need to compile
+the `MotionCorrection` extension.
+
+Set the Space hardware to **ZeroGPU** and add an `HF_TOKEN` secret with access to the gated
+Llama 3 repositories used by Kimodo's LLM2Vec text encoder. The default model is
+`Kimodo-SOMA-RP-v1.1`; override it with the `KIMODO_MODEL` Space variable if needed.
 
 <div align="center">
   <img src="assets/teaser.gif" width="1280">
