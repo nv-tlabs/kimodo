@@ -133,6 +133,11 @@ class Kimodo(nn.Module):
         first_heading_angle: Optional[torch.Tensor] = None,
         # for transitioning
         num_transition_frames: int = 5,
+        # continue an existing motion instead of starting fresh: un-normalized motion
+        # features [b, t, d] for at least `num_transition_frames` frames. Seeding this
+        # makes the first requested segment take the transition path, so it continues
+        # from the supplied motion rather than being generated as a first motion.
+        initial_motion: Optional[torch.Tensor] = None,
         # for postprocess
         post_processing: bool = False,
         root_margin: float = 0.04,
@@ -159,6 +164,18 @@ class Kimodo(nn.Module):
         # Generate one chunck at a time
         current_frame = 0
         generated_motions = []
+        if initial_motion is not None:
+            seed = torch.as_tensor(initial_motion, device=device)
+            if seed.ndim == 2:
+                seed = seed[None]
+            if seed.shape[0] != num_samples:
+                seed = seed.expand(num_samples, -1, -1)
+            if seed.shape[1] < num_transition_frames:
+                raise ValueError(
+                    f"initial_motion needs at least num_transition_frames "
+                    f"({num_transition_frames}) frames, got {seed.shape[1]}"
+                )
+            generated_motions.append(seed)
 
         for idx, (text, num_frame) in enumerate(zip(texts, num_frames)):
             texts_bs = [text for _ in range(num_samples)]
@@ -391,6 +408,7 @@ class Kimodo(nn.Module):
         first_heading_angle: Optional[torch.Tensor] = None,
         # for transitioning
         num_transition_frames: int = 5,
+        initial_motion: Optional[torch.Tensor] = None,
         # for postprocess
         post_processing: bool = False,
         root_margin: float = 0.04,
@@ -465,6 +483,7 @@ class Kimodo(nn.Module):
                 return_numpy,
                 first_heading_angle,
                 num_transition_frames,
+                initial_motion,
                 post_processing,
                 root_margin,
                 progress_bar,
