@@ -11,6 +11,7 @@
 #include "Constants.h"
 
 #include <math.h>
+#include <cstdlib>
 #include <stdint.h>
 
 //
@@ -48,8 +49,8 @@ namespace Math
     FORCE_INLINE double Abs( double a ) { return fabs( a ); }
     FORCE_INLINE int8_t Abs( int8_t a ) { return (int8_t) abs( a ); }
     FORCE_INLINE int16_t Abs( int16_t a ) { return (int16_t) abs( a ); }
-    FORCE_INLINE int32_t Abs( int32_t a ) { return labs( a ); }
-    FORCE_INLINE int64_t Abs( int64_t a ) { return llabs( a ); }
+    FORCE_INLINE int32_t Abs( int32_t a ) { return std::labs( a ); }
+    FORCE_INLINE int64_t Abs( int64_t a ) { return std::llabs( a ); }
 
     FORCE_INLINE float Reciprocal( float r ) { return 1.0f / r; }
     FORCE_INLINE double Reciprocal( double r ) { return 1.0 / r; }
