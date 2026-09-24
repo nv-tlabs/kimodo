@@ -7,6 +7,8 @@ import os
 import numpy as np
 import torch
 
+from kimodo.device import resolve_device
+
 from .llm2vec import LLM2Vec
 
 
@@ -40,8 +42,7 @@ class LLM2VecEncoder:
         env_device = os.environ.get("TEXT_ENCODER_DEVICE")
         if env_device:
             device = env_device
-        if device == "auto":
-            device = "cuda" if torch.cuda.is_available() else "cpu"
+        device = resolve_device(device, env_var="TEXT_ENCODER_DEVICE")
         self._device = device
         if device is not None:
             self.model = self.model.to(device)
@@ -91,5 +92,5 @@ class LLM2VecEncoder:
             encoded_text = encoded_text[0]
             lengths = lengths[0]
 
-        encoded_text = torch.tensor(encoded_text).to(self._device)
+        encoded_text = torch.as_tensor(encoded_text, device=self._device)
         return encoded_text, lengths

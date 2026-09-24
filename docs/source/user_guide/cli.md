@@ -69,8 +69,8 @@ Motions generated with the CLI can be visualized in the demo UI. To do this, und
 
 To see all available flags, run `kimodo_gen --help`. They are:
 
-- `prompt`: Text description of the desired motion (required)
-- `--model`: Model name to use (default: `Kimodo-SOMA-RP-v1`; options are the models in [this table](../getting_started/quick_start.md#overview-kimodo-models))
+- `prompt`: Text description of the desired motion. Required unless `--input_folder` supplies prompts through `meta.json`.
+- `--model`: Model name to use (default alias: `kimodo-soma-rp`, currently resolving to `Kimodo-SOMA-RP-v1.1`; options are the models in [this table](../getting_started/quick_start.md#overview-kimodo-models))
 - `--duration`: Motion duration in seconds (default: `5.0`). For multiple prompts,
   pass space-separated durations in a string.
 - `--diffusion_steps`: Number of denoising steps (default: `100`)
@@ -82,6 +82,7 @@ To see all available flags, run `kimodo_gen --help`. They are:
 - `--bvh`: Optional flag. When set, also export BVH (SOMA models only) using the same stem as `--output`.
 - `--bvh_standard_tpose`: If exporting BVH, export with the rest pose being the standard T-pose rather than the rest pose consistent with the BONES-SEED dataset.
 - `--seed`: Seed for reproducible results
+- `--device`: PyTorch device (`auto`, `mps`, `cuda`, or `cpu`; default: `auto`)
 - `--no-postprocess`: Disable post-processing (includes foot skate cleanup and constraint optimization)
 - `--input_folder`: Folder containing meta.json and optional constraints.json. If set, generation settings are loaded from meta.json. These are found in demo example folders.
 - `--cfg_type`: Classifier-free guidance mode: `nocfg`, `regular`, or `separated` (the custom mode with independent text and constraint scales). See {ref}`Classifier-free guidance (details) <classifier-free-guidance-cfg>` below.
@@ -126,9 +127,9 @@ If you want to use kimodo in another project, you can interact with it like this
 ```python
 from kimodo import load_model
 
-model = load_model("kimodo-soma-rp", device="cuda")
+model = load_model("kimodo-soma-rp", device="auto")
 output = model(
-    prompt="A person jumps",
+    prompts="A person jumps",
     num_frames=150,
     num_denoising_steps=100,
 )

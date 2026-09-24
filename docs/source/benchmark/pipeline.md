@@ -112,7 +112,7 @@ The default TMR model (`tmr-soma-rp`) trained on the full Rigplay dataset is rel
 Options:
 
 - `--model`: TMR model to use for encoding (default: `tmr-soma-rp`).
-- `--device`: compute device (`cuda` or `cpu`). Defaults to `cuda` if available, otherwise `cpu`.
+- `--device`: compute device (`auto`, `mps`, `cuda`, or `cpu`). `auto` prefers CUDA, then MPS, then CPU.
 - `--overwrite`: re-embed even if embedding files already exist.
 - `--text_encoder_fp32`: will instantiate the text encoder (if needed) with float32 precision instead of bfloat16. The TMR model is trained with float32 text encodings, so this slightly improves accuracy but requires extra VRAM.
 
@@ -134,7 +134,7 @@ python benchmark/evaluate_folder.py generated_folder
 
 Options:
 
-- `--device`: compute device (`cuda` or `cpu`). Defaults to `cuda` if available, otherwise `cpu`.
+- `--device`: compute device (`auto`, `mps`, `cuda`, or `cpu`). `auto` prefers CUDA, then MPS, then CPU.
 
 The script runs two evaluation passes: one on the generated motion (`motion.npz`) and one on the ground-truth motion (`gt_motion.npz`). It outputs:
 

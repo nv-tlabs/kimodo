@@ -582,11 +582,12 @@ class Kimodo(nn.Module):
         """
 
         device = self.device
+        model_dtype = next(self.denoiser.parameters()).dtype
         if text_feat is None:
             assert text_pad_mask is None
             log.info("Encoding text...")
             text_feat, text_length = self.text_encoder(texts)
-            text_feat = text_feat.to(device)
+            text_feat = text_feat.to(device=device, dtype=model_dtype)
 
             # handle empty string (set to zero)
             empty_text_mask = [len(text.strip()) == 0 for text in texts]
@@ -597,6 +598,10 @@ class Kimodo(nn.Module):
             tensor_text_length = torch.tensor(text_length, device=device)
             tensor_text_length[empty_text_mask] = 0
             text_pad_mask = torch.arange(maxlen, device=device).expand(batch_size, maxlen) < tensor_text_length[:, None]
+        else:
+            text_feat = text_feat.to(device=device, dtype=model_dtype)
+            if text_pad_mask is not None:
+                text_pad_mask = text_pad_mask.to(device=device)
 
         if motion_mask is not None:
             if motion_mask.dtype == torch.bool:

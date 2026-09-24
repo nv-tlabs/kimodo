@@ -18,6 +18,7 @@ from torch.utils.data import DataLoader, Dataset
 from tqdm.auto import tqdm
 
 from kimodo.constraints import load_constraints_lst
+from kimodo.device import resolve_device
 from kimodo.meta import parse_prompts_from_meta
 from kimodo.model import DEFAULT_MODEL, load_model
 from kimodo.tools import load_json, seed_everything
@@ -75,6 +76,12 @@ def parse_args():
         "--text_encoder_fp32",
         action="store_true",
         help="Uses fp32 for instantiating the text encoder (if API is not already running) rather than default bfloat16.",
+    )
+    parser.add_argument(
+        "--device",
+        type=str,
+        default="auto",
+        help="PyTorch device: auto, mps, cuda, or cpu (default: auto).",
     )
     return parser.parse_args()
 
@@ -203,10 +210,9 @@ def _crop_output(output: dict[str, Any], num_frames: int) -> dict[str, Any]:
 
 
 def main():
-    device = "cuda:0" if torch.cuda.is_available() else "cpu"
-    print(f"Using device: {device}")
-
     args = parse_args()
+    device = resolve_device(args.device)
+    print(f"Using device: {device}")
     testsuite_root = Path(args.benchmark).resolve()
     if args.output is not None:
         generated_root = Path(args.output).resolve()

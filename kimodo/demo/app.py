@@ -10,9 +10,11 @@ from typing import Optional
 
 import numpy as np
 import torch
-
 import viser
+from viser.theme import TitlebarButton, TitlebarConfig, TitlebarImage
+
 from kimodo.assets import DEMO_ASSETS_ROOT
+from kimodo.device import resolve_device
 from kimodo.model.load_model import load_model
 from kimodo.model.registry import resolve_model_name
 from kimodo.skeleton import SkeletonBase, SOMASkeleton30
@@ -25,7 +27,6 @@ from kimodo.viz.viser_utils import (
     FullbodyKeyframeSet,
     RootKeyframe2DSet,
 )
-from viser.theme import TitlebarButton, TitlebarConfig, TitlebarImage
 
 from . import generation, ui
 from .config import (
@@ -53,8 +54,8 @@ from .state import ClientSession, ModelBundle
 
 
 class Demo:
-    def __init__(self, default_model_name: str = DEFAULT_MODEL):
-        self.device = "cuda:0" if torch.cuda.is_available() else "cpu"
+    def __init__(self, default_model_name: str = DEFAULT_MODEL, device: str = "auto"):
+        self.device = resolve_device(device)
         print(f"Using device: {self.device}")
         self.models: dict[str, ModelBundle] = {}
         self._text_encoder = None
@@ -504,7 +505,7 @@ class Demo:
 
         Trigger auto-restart if corrupted.
         """
-        if self.device == "cpu":
+        if not self.device.startswith("cuda"):
             return True
         try:
             torch.tensor([1.0], device=self.device) + torch.tensor([1.0], device=self.device)

@@ -10,6 +10,7 @@ import torch
 
 from kimodo import DEFAULT_MODEL, load_model
 from kimodo.constraints import load_constraints_lst
+from kimodo.device import resolve_device
 from kimodo.exports.motion_io import save_kimodo_npz
 from kimodo.meta import load_prompts_from_meta
 from kimodo.model.cfg import CFG_TYPES
@@ -97,6 +98,12 @@ def parse_args():
         type=int,
         default=None,
         help="Seed for reproducible results",
+    )
+    parser.add_argument(
+        "--device",
+        type=str,
+        default="auto",
+        help="PyTorch device: auto, mps, cuda, or cpu (default: auto).",
     )
     parser.add_argument(
         "--input_folder",
@@ -274,10 +281,9 @@ def get_generation_inputs(args, fps: float):
 
 
 def main():
-    device = "cuda:0" if torch.cuda.is_available() else "cpu"
-    print(f"Using device: {device}")
-
     args = parse_args()
+    device = resolve_device(args.device)
+    print(f"Using device: {device}")
 
     # Load model (resolution of name done inside load_model)
     model, resolved_model = load_model(
