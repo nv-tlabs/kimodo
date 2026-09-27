@@ -1486,6 +1486,7 @@ def create_gui(
                 if session is None:
                     return
                 recording_notification: viser.NotificationHandle | None = None
+                was_playing = session.playing
                 try:
                     recording_notification = event_client.add_notification(
                         title="Recording video...",
@@ -1501,6 +1502,7 @@ def create_gui(
                     width = _round_up_to_multiple(width, 16)
                     height = _round_up_to_multiple(height, 16)
                     original_frame = session.frame_idx
+                    session.playing = False
                     frames = []
                     for frame_idx in range(session.max_frame_idx + 1):
                         demo.set_frame(
@@ -1508,6 +1510,7 @@ def create_gui(
                             frame_idx,
                             update_timeline=True,
                         )
+                        event_client.flush()
                         frames.append(
                             event_client.get_render(
                                 height=height,
@@ -1518,6 +1521,7 @@ def create_gui(
 
                     # Restore the original frame (and timeline).
                     demo.set_frame(event_client.client_id, original_frame)
+                    event_client.flush()
 
                     import imageio.v3 as iio
 
@@ -1551,6 +1555,7 @@ def create_gui(
                         color="red",
                     )
                 finally:
+                    session.playing = was_playing
                     event_client.timeline.enable_constraints()
                     if recording_notification is not None:
                         recording_notification.remove()
