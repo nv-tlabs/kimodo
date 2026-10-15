@@ -58,6 +58,8 @@ from transformers import (
     Qwen2Config,
 )
 
+from ...device_utils import resolve_torch_device
+
 logger = logging.getLogger(__name__)
 
 
@@ -319,9 +321,9 @@ class LLM2Vec(nn.Module):
             show_progress_bar: whether to show progress bars during encoding steps.
             convert_to_numpy: If true, return numpy arrays instead of torch tensors.
             convert_to_tensor: If true, return torch tensors (default).
-            device: torch backend device identifier (e.g., 'cuda', 'cpu','mps' etc.). If not specified,
-            the default is to use cuda when available, otherwise cpu. Note that only the choice of 'cuda' supports
-            multiprocessing as currently implemented.
+            device: torch backend device identifier (e.g., 'cuda', 'cpu', 'mps', etc.). If not specified,
+            the default is to prefer cuda when available, then mps, then cpu. Note that only the choice of
+            'cuda' supports multiprocessing as currently implemented.
 
         Returns: embeddings of the sentences. Embeddings are detached and always on the CPU (see _encode implementation).
 
@@ -332,8 +334,7 @@ class LLM2Vec(nn.Module):
         if isinstance(sentences[0], str):
             sentences = [[""] + [sentence] for sentence in sentences]
 
-        if device is None:
-            device = "cuda" if torch.cuda.is_available() else "cpu"
+        device = resolve_torch_device(device)
 
         concatenated_input_texts = []
         for sentence in sentences:
@@ -351,7 +352,7 @@ class LLM2Vec(nn.Module):
         sentences_sorted = [sentences[idx] for idx in length_sorted_idx]
         all_embeddings = []
 
-        if torch.cuda.device_count() <= 1:
+        if not str(device).startswith("cuda") or torch.cuda.device_count() <= 1:
             # This branch also support mps devices
             self.to(device)
             for start_index in trange(

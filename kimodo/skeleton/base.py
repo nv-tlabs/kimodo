@@ -3,7 +3,7 @@
 """Base skeleton class: hierarchy, joint metadata, and helpers for kinematics and motion."""
 
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union
 
 import torch
 
@@ -15,6 +15,28 @@ from .transforms import (
     global_rots_to_local_rots,
     to_standard_tpose,
 )
+
+
+def _resolve_to_target(
+    args: tuple,
+    kwargs: dict,
+) -> tuple[Optional[Union[str, torch.device]], Optional[torch.dtype]]:
+    device = kwargs.get("device")
+    dtype = kwargs.get("dtype")
+
+    if args:
+        first = args[0]
+        if isinstance(first, torch.dtype):
+            dtype = first
+        elif torch.is_tensor(first):
+            device = first.device
+            dtype = first.dtype
+        else:
+            device = first
+        if len(args) > 1 and isinstance(args[1], torch.dtype):
+            dtype = args[1]
+
+    return device, dtype
 
 
 class SkeletonBase(torch.nn.Module):
@@ -34,6 +56,29 @@ class SkeletonBase(torch.nn.Module):
     foot_joint_idx = None
     hip_joint_names = None  # in order [right, left]
     hip_joint_idx = None  # in order [right, left]
+
+    def to(self, *args, **kwargs):
+        """Move the skeleton while keeping MPS-safe floating dtypes."""
+
+        device, dtype = _resolve_to_target(args, kwargs)
+        if device is None or not str(device).lower().startswith("mps"):
+            return super().to(*args, **kwargs)
+
+        target_device = torch.device(device)
+        target_dtype = torch.float32 if dtype == torch.float64 else dtype
+
+        def _convert(tensor: torch.Tensor) -> torch.Tensor:
+            if not isinstance(tensor, torch.Tensor):
+                return tensor
+            if tensor.is_floating_point():
+                dtype_for_tensor = target_dtype
+                if dtype_for_tensor is None:
+                    dtype_for_tensor = torch.float32 if tensor.dtype == torch.float64 else tensor.dtype
+                return tensor.to(device=target_device, dtype=dtype_for_tensor)
+            return tensor.to(device=target_device)
+
+        self._apply(_convert)
+        return self
 
     def __init__(
         self,

@@ -91,5 +91,5 @@ class LLM2VecEncoder:
             encoded_text = encoded_text[0]
             lengths = lengths[0]
 
-        encoded_text = torch.tensor(encoded_text).to(self._device)
+        encoded_text = torch.as_tensor(encoded_text, device=self._device)
         return encoded_text, lengths

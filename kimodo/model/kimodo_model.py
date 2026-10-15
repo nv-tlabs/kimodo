@@ -22,6 +22,37 @@ from .diffusion import DDIMSampler, Diffusion
 log = logging.getLogger(__name__)
 
 
+def _normalize_mps_floating_tensors(module: nn.Module) -> None:
+    """MPS cannot materialize float64 tensors; coerce stray fp64 buffers/params."""
+
+    for child in module.modules():
+        for name, buffer in list(child._buffers.items()):
+            if isinstance(buffer, torch.Tensor) and buffer.is_floating_point() and buffer.dtype == torch.float64:
+                child._buffers[name] = buffer.to(dtype=torch.float32)
+        for name, parameter in list(child._parameters.items()):
+            if isinstance(parameter, nn.Parameter) and parameter.is_floating_point() and parameter.dtype == torch.float64:
+                child._parameters[name] = nn.Parameter(
+                    parameter.to(dtype=torch.float32),
+                    requires_grad=parameter.requires_grad,
+                )
+
+
+def _move_module_to_mps(module: nn.Module, device: Union[str, torch.device]) -> None:
+    """Move a module to MPS while preserving existing dtypes except fp64 -> fp32."""
+
+    target_device = torch.device(device)
+
+    def _convert(tensor: torch.Tensor) -> torch.Tensor:
+        if not isinstance(tensor, torch.Tensor):
+            return tensor
+        if tensor.is_floating_point():
+            target_dtype = torch.float32 if tensor.dtype == torch.float64 else tensor.dtype
+            return tensor.to(device=target_device, dtype=target_dtype)
+        return tensor.to(device=target_device)
+
+    module._apply(_convert)
+
+
 class Kimodo(nn.Module):
     """Helper class for test time."""
 
@@ -55,7 +86,11 @@ class Kimodo(nn.Module):
         self.device = device
         # for classifier-free guidance
 
-        self.to(device)
+        if str(device).lower().startswith("mps"):
+            _normalize_mps_floating_tensors(self)
+            _move_module_to_mps(self, device)
+        else:
+            self.to(device)
 
     @property
     def output_skeleton(self):
@@ -582,11 +617,12 @@ class Kimodo(nn.Module):
         """
 
         device = self.device
+        model_dtype = next(self.denoiser.parameters()).dtype
         if text_feat is None:
             assert text_pad_mask is None
             log.info("Encoding text...")
             text_feat, text_length = self.text_encoder(texts)
-            text_feat = text_feat.to(device)
+            text_feat = text_feat.to(device=device, dtype=model_dtype)
 
             # handle empty string (set to zero)
             empty_text_mask = [len(text.strip()) == 0 for text in texts]
@@ -597,6 +633,10 @@ class Kimodo(nn.Module):
             tensor_text_length = torch.tensor(text_length, device=device)
             tensor_text_length[empty_text_mask] = 0
             text_pad_mask = torch.arange(maxlen, device=device).expand(batch_size, maxlen) < tensor_text_length[:, None]
+        else:
+            text_feat = text_feat.to(device=device, dtype=model_dtype)
+            if text_pad_mask is not None:
+                text_pad_mask = text_pad_mask.to(device=device)
 
         if motion_mask is not None:
             if motion_mask.dtype == torch.bool:

@@ -7,6 +7,24 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # Find Python
 find_package(Python3 COMPONENTS Interpreter Development REQUIRED)
 
+# Find SIMDe for translating x86 intrinsics on arm64/aarch64.
+find_path(SIMDE_INCLUDE_DIR
+    NAMES simde/x86/sse.h
+    HINTS
+        ENV SIMDE_INCLUDE_DIR
+        ENV CONDA_PREFIX
+        /opt/homebrew/include
+        /usr/local/include
+        /opt/local/include
+    PATH_SUFFIXES include
+)
+
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "arm64|aarch64|ARM64")
+    if(NOT SIMDE_INCLUDE_DIR)
+        message(FATAL_ERROR "SIMDe headers not found. Install simde or set CMAKE_PREFIX_PATH.")
+    endif()
+endif()
+
 # Find or fetch pybind11
 find_package(pybind11 CONFIG QUIET)
 if(NOT pybind11_FOUND)
@@ -21,7 +39,7 @@ if(NOT pybind11_FOUND)
 endif()
 
 # Find or fetch Eigen
-find_package(Eigen3 3.3 CONFIG QUIET)
+find_package(Eigen3 CONFIG QUIET)
 if(NOT Eigen3_FOUND)
     message(STATUS "Eigen3 not found, fetching from GitLab...")
     include(FetchContent)
@@ -61,6 +79,10 @@ target_include_directories(motion_correction_cpp_base PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/src/cpp
 )
 
+if(SIMDE_INCLUDE_DIR)
+    target_include_directories(motion_correction_cpp_base PUBLIC ${SIMDE_INCLUDE_DIR})
+endif()
+
 if(TARGET Eigen3::Eigen)
     target_link_libraries(motion_correction_cpp_base PUBLIC Eigen3::Eigen)
 else()
@@ -70,13 +92,27 @@ endif()
 target_compile_definitions(motion_correction_cpp_base PUBLIC EIGEN_MPL2_ONLY)
 
 # Compiler-specific settings
+# SSE4.1/AVX are x86-only instruction sets; only enable them on x86 targets.
+# On arm64 (e.g. Apple Silicon) Eigen falls back to NEON automatically.
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|i.86")
+    set(MOTION_CORRECTION_IS_X86 ON)
+else()
+    set(MOTION_CORRECTION_IS_X86 OFF)
+endif()
+
 if(MSVC)
     # MSVC-specific flags
-    target_compile_options(motion_correction_cpp_base PRIVATE /W4 /arch:AVX)
+    target_compile_options(motion_correction_cpp_base PRIVATE /W4)
+    if(MOTION_CORRECTION_IS_X86)
+        target_compile_options(motion_correction_cpp_base PRIVATE /arch:AVX)
+    endif()
 else()
     # GCC/Clang flags (also applies to MinGW on Windows)
-    # Enable SSE4.1 and AVX instructions for SIMD operations
-    target_compile_options(motion_correction_cpp_base PRIVATE -Wall -Wextra -msse4.1 -mavx)
+    target_compile_options(motion_correction_cpp_base PRIVATE -Wall -Wextra)
+    # Enable SSE4.1 and AVX instructions for SIMD operations (x86 only)
+    if(MOTION_CORRECTION_IS_X86)
+        target_compile_options(motion_correction_cpp_base PRIVATE -msse4.1 -mavx)
+    endif()
 endif()
 
 # Python bindings

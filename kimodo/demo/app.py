@@ -13,6 +13,7 @@ import torch
 
 import viser
 from kimodo.assets import DEMO_ASSETS_ROOT
+from kimodo.device_utils import resolve_torch_device
 from kimodo.model.load_model import load_model
 from kimodo.model.registry import resolve_model_name
 from kimodo.skeleton import SkeletonBase, SOMASkeleton30
@@ -54,7 +55,7 @@ from .state import ClientSession, ModelBundle
 
 class Demo:
     def __init__(self, default_model_name: str = DEFAULT_MODEL):
-        self.device = "cuda:0" if torch.cuda.is_available() else "cpu"
+        self.device = resolve_torch_device("auto")
         print(f"Using device: {self.device}")
         self.models: dict[str, ModelBundle] = {}
         self._text_encoder = None

@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import os
+import platform
 import shutil
 import subprocess
 import sys
@@ -99,6 +100,43 @@ kimodo_packages = find_packages(include=["kimodo", "kimodo.*"])
 # When set (e.g. in Docker), do not bundle motion_correction here; it is installed
 # separately (e.g. from docker_requirements.txt as ./MotionCorrection) non-editable.
 skip_motion_correction = os.environ.get("SKIP_MOTION_CORRECTION_IN_SETUP", "").strip().lower() in ("1", "true", "yes")
+
+def _simde_header_available() -> bool:
+    candidates = []
+    for env_name in ("SIMDE_INCLUDE_DIR", "CONDA_PREFIX"):
+        value = os.environ.get(env_name, "").strip()
+        if value:
+            candidates.append(Path(value))
+            candidates.append(Path(value) / "include")
+    cmake_prefix = os.environ.get("CMAKE_PREFIX_PATH", "").replace(";", os.pathsep)
+    for entry in cmake_prefix.split(os.pathsep):
+        if entry.strip():
+            candidates.append(Path(entry.strip()))
+            candidates.append(Path(entry.strip()) / "include")
+    candidates.extend(
+        [
+            Path("/opt/homebrew/include"),
+            Path("/usr/local/include"),
+            Path("/opt/local/include"),
+        ]
+    )
+    return any((path / "simde/x86/sse.h").exists() for path in candidates)
+
+
+# The motion_correction native extension is written against x86 intrinsics. On
+# arm64/aarch64 we can build it through SIMDe; if SIMDe is unavailable, keep the
+# package install usable by skipping the optional native post-processing module.
+_machine = platform.machine().lower()
+_is_x86 = _machine in ("x86_64", "amd64", "i386", "i486", "i586", "i686")
+_force_motion_correction = os.environ.get("FORCE_MOTION_CORRECTION_BUILD", "").strip().lower() in ("1", "true", "yes")
+if not skip_motion_correction and not _is_x86 and not (_force_motion_correction or _simde_header_available()):
+    print(
+        f"Skipping motion_correction native extension: architecture '{platform.machine()}' is not x86 "
+        "and SIMDe headers were not found. Install simde or set FORCE_MOTION_CORRECTION_BUILD=1 to override."
+    )
+    skip_motion_correction = True
+elif not skip_motion_correction and not _is_x86:
+    print(f"Building motion_correction for '{platform.machine()}' through SIMDe.")
 
 if skip_motion_correction:
     packages = kimodo_packages
