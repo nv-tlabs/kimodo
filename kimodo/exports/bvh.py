@@ -6,44 +6,12 @@ This module is intended to hold lightweight serialization / export helpers that 
 outside of interactive demos.
 """
 
-import os
-import tempfile
 from pathlib import Path
 from typing import Tuple, Union
 
 import numpy as np
 import torch
-
-from kimodo.geometry import matrix_to_quaternion as _matrix_to_quaternion
-
-
-def _strip_end_site_blocks(bvh_text: str) -> str:
-    """Remove all 'End Site { ... }' blocks from BVH text so output matches original format.
-
-    bvhio adds an End Site for every leaf joint when writing; we do not set EndSite on joints, so we
-    post-process the string to remove these blocks for Blender/original compatibility.
-    """
-    lines = bvh_text.splitlines(keepends=True)
-    result = []
-    i = 0
-    while i < len(lines):
-        line = lines[i]
-        if "End Site" in line:
-            # Skip this line and the following block { ... }; brace-count to find closing }
-            i += 1
-            if i < len(lines) and "{" in lines[i]:
-                i += 1
-                depth = 1
-                while i < len(lines) and depth > 0:
-                    if "{" in lines[i]:
-                        depth += 1
-                    if "}" in lines[i]:
-                        depth -= 1
-                    i += 1
-            continue
-        result.append(line)
-        i += 1
-    return "".join(result)
+from scipy.spatial.transform import Rotation
 
 
 def _coerce_batch(name: str, x: torch.Tensor, *, expected_ndim: int) -> torch.Tensor:
@@ -59,6 +27,38 @@ def _coerce_batch(name: str, x: torch.Tensor, *, expected_ndim: int) -> torch.Te
     raise ValueError(f"{name} must have shape (T, ...) or (1, T, ...); got {tuple(x.shape)}")
 
 
+def _rotation_matrices_to_bvh_eulers(local_rot_mats: np.ndarray) -> np.ndarray:
+    """Convert local rotation matrices to BVH Z/Y/X channel angles in degrees."""
+    nframes, njoints = local_rot_mats.shape[:2]
+    euler_rad = Rotation.from_matrix(local_rot_mats.reshape(-1, 3, 3)).as_euler("ZYX")
+    euler_rad = euler_rad.reshape(nframes, njoints, 3)
+    # Keep common +/-pi channel wraps continuous. Euler branch choices can still
+    # flip coupled axes near gimbal lock, but the represented rotations are unchanged.
+    return np.rad2deg(np.unwrap(euler_rad, axis=0))
+
+
+def _prepare_bvh_rest_pose(
+    local_rot_mats: torch.Tensor,
+    skeleton,
+    *,
+    standard_tpose: bool,
+) -> Tuple[torch.Tensor, np.ndarray]:
+    if standard_tpose:
+        if not hasattr(skeleton, "neutral_joints"):
+            raise ValueError(f"BVH export requires neutral_joints on skeleton {skeleton.name!r}.")
+        return local_rot_mats, skeleton.neutral_joints.detach().cpu().numpy()
+
+    if not hasattr(skeleton, "global_rot_offsets") or not hasattr(skeleton, "bvh_neutral_joints"):
+        raise ValueError(
+            "BVH export with standard_tpose=False requires skeleton-specific BVH rest-pose assets "
+            f"(global_rot_offsets and bvh_neutral_joints); skeleton {skeleton.name!r} does not provide them. "
+            "Use standard_tpose=True for this skeleton."
+        )
+
+    local_rot_mats, _ = skeleton.from_standard_tpose(local_rot_mats)
+    return local_rot_mats, skeleton.bvh_neutral_joints.detach().cpu().numpy()
+
+
 def motion_to_bvh(
     local_rot_mats: torch.Tensor,
     root_positions: torch.Tensor,
@@ -72,23 +72,15 @@ def motion_to_bvh(
     Args:
         local_rot_mats: (T, J, 3, 3) or (1, T, J, 3, 3) local rotation matrices.
         root_positions: (T, 3) or (1, T, 3) root joint positions (e.g. from posed joints).
-        skeleton: Skeleton with bone_order_names, bvh_neutral_joints, etc.
+        skeleton: Skeleton with bone_order_names, joint_parents, and neutral_joints.
         fps: Frames per second for the motion.
-        standard_tpose: If True, export with the rest pose being the standard T-pose rather than the rest pose consistent with the BONES-SEED dataset.
+        standard_tpose: If True, export with the skeleton's standard neutral pose as the BVH rest pose.
+            If False, export with the skeleton-specific BVH rest pose, e.g. the BONES-SEED-compatible
+            rest pose for SOMA. This mode requires ``global_rot_offsets`` and ``bvh_neutral_joints``.
     Notes:
         BVH is plain-text. Root is named "Root" with ZYX rotation order; leaf joints
-        have no End Site block.
+        have no End Site blocks to match the source BVH convention.
     """
-    try:
-        import bvhio  # type: ignore[import-not-found]
-        import glm  # type: ignore[import-not-found]
-        from SpatialTransform import Pose  # type: ignore[import-not-found]
-    except Exception as e:  # pragma: no cover
-        raise ImportError(
-            "BVH export requires `bvhio` (and its deps `PyGLM` + `SpatialTransform`). "
-            "Install with: `pip install bvhio`."
-        ) from e
-
     local_rot_mats = local_rot_mats.detach()
     root_positions = root_positions.detach()
     # SOMA: accept either somaskel30 (convert to 77) or somaskel77 (use as-is)
@@ -96,12 +88,7 @@ def motion_to_bvh(
         local_rot_mats = skeleton.to_SOMASkeleton77(local_rot_mats)
         skeleton = skeleton.somaskel77
 
-    if standard_tpose:
-        neutral = skeleton.neutral_joints.detach().cpu().numpy()
-    else:
-        # transform local rots to the original rest pose consistent with the BONES-SEED dataset
-        local_rot_mats, _ = skeleton.from_standard_tpose(local_rot_mats)
-        neutral = skeleton.bvh_neutral_joints.detach().cpu().numpy()
+    local_rot_mats, neutral = _prepare_bvh_rest_pose(local_rot_mats, skeleton, standard_tpose=standard_tpose)
 
     joint_names = list(skeleton.bone_order_names)
     parents = skeleton.joint_parents.detach().cpu().numpy().astype(int)
@@ -109,13 +96,14 @@ def motion_to_bvh(
 
     local_rot_mats = _coerce_batch("local_rot_mats", local_rot_mats, expected_ndim=4)
     T, J = local_rot_mats.shape[:2]
-    q_wxyz = _matrix_to_quaternion(local_rot_mats).detach().cpu().numpy()  # [T, J, 4]
+    if J != len(joint_names):
+        raise ValueError(f"local_rot_mats has {J} joints but skeleton {skeleton.name!r} has {len(joint_names)} joints.")
+    local_eulers = _rotation_matrices_to_bvh_eulers(local_rot_mats.detach().cpu().numpy())
 
     root_xyz = _coerce_batch("root_positions", root_positions, expected_ndim=2)
     root_xyz = root_xyz.cpu().numpy()  # [T, 3]
 
-    # Build BVH hierarchy: Root (wrapper at origin) -> Hips (pelvis with offset in meters) -> ...
-    # Offsets are in meters to match the original format.
+    # Build BVH hierarchy: Root wrapper at origin -> skeleton root -> skeleton joints.
     children: dict[int, list[int]] = {i: [] for i in range(J)}
     for i, p in enumerate(parents):
         if p >= 0:
@@ -131,7 +119,7 @@ def motion_to_bvh(
     ]
     _JOINT_CHANNELS = ["Zrotation", "Yrotation", "Xrotation"]
 
-    # Scale from meters to centimeters (match original SEED data BVH scale).
+    # BVH writes offsets and root motion in centimeters, matching the SEED data scale.
     neutral = neutral * 100
     root_xyz = root_xyz * 100
 
@@ -141,74 +129,45 @@ def motion_to_bvh(
     if (hips_offset == 0).all():
         hips_offset = np.array([0.0, 100.0, 0.0], dtype=neutral.dtype)  # 1 m in cm
 
-    def _make_joint(i: int) -> "bvhio.BvhJoint":
-        name = joint_names[i]
-        j = bvhio.BvhJoint(name, offset=glm.vec3(0, 0, 0))
+    bvh_lines = ["HIERARCHY", "ROOT Root", "{", "  OFFSET 0 0 0"]
+    bvh_lines.append("  CHANNELS 6 " + " ".join(_ROOT_CHANNELS))
+    ordered_joint_ids = []
+
+    def _write_joint(i: int, indent: int) -> None:
+        prefix = "  " * indent
+        ordered_joint_ids.append(i)
+        bvh_lines.append(f"{prefix}JOINT {joint_names[i]}")
+        bvh_lines.append(f"{prefix}{{")
         if i == root_idx:
-            # Hips: offset from Root (origin) in cm
             off = hips_offset
-            j.Offset = glm.vec3(float(off[0]), float(off[1]), float(off[2]))
-            j.Channels = _ROOT_CHANNELS.copy()
+            channels = _ROOT_CHANNELS
         else:
             p = int(parents[i])
             off = neutral[i] - neutral[p]
-            j.Offset = glm.vec3(float(off[0]), float(off[1]), float(off[2]))
-            j.Channels = _JOINT_CHANNELS.copy()
-
+            channels = _JOINT_CHANNELS
+        offset = " ".join(f"{float(x):.6f}" for x in off)
+        bvh_lines.append(f"{prefix}  OFFSET {offset}")
+        bvh_lines.append(f"{prefix}  CHANNELS {len(channels)} {' '.join(channels)}")
         for c in children[i]:
-            j.Children.append(_make_joint(c))
-        return j
+            _write_joint(int(c), indent + 1)
+        bvh_lines.append(f"{prefix}}}")
 
-    # Wrapper Root at origin; single child is Hips (skeleton root).
-    root_wrapper = bvhio.BvhJoint("Root", offset=glm.vec3(0.0, 0.0, 0.0))
-    root_wrapper.Channels = _ROOT_CHANNELS.copy()
-    root_wrapper.Children.append(_make_joint(root_idx))
-    root_joint = root_wrapper
+    # Wrapper Root at origin; its single child is Hips, which carries root motion.
+    _write_joint(root_idx, indent=1)
+    bvh_lines.append("}")
+    bvh_lines.append("MOTION")
+    bvh_lines.append(f"Frames: {T}")
+    bvh_lines.append(f"Frame Time: {1.0 / float(fps)}")
 
-    # Populate keyframes: Root = identity/zero, Hips = root motion, others = local rotation.
-    bvh_layout = root_joint.layout()
-    name_to_id = {n: idx for idx, n in enumerate(joint_names)}
-    ordered_joint_ids = []
-    for bj, _, _ in bvh_layout:
-        if bj.Name == "Root":
-            ordered_joint_ids.append(None)
-        else:
-            ordered_joint_ids.append(name_to_id[bj.Name])
-
-    bvh_joints = [bj for bj, _, _ in bvh_layout]
-    for bj in bvh_joints:
-        bj.Keyframes = [None] * T  # type: ignore[list-item]
-
-    identity_quat = glm.quat(1.0, 0.0, 0.0, 0.0)
-    zero_vec = glm.vec3(0.0, 0.0, 0.0)
     for t in range(T):
-        for bj, jid in zip(bvh_joints, ordered_joint_ids):
-            if jid is None:
-                position = zero_vec
-                rotation = identity_quat
-            elif jid == root_idx:
-                pos = root_xyz[t]
-                position = glm.vec3(float(pos[0]), float(pos[1]), float(pos[2]))
-                qw, qx, qy, qz = q_wxyz[t, jid]
-                rotation = glm.quat(float(qw), float(qx), float(qy), float(qz))
-            else:
-                position = zero_vec
-                qw, qx, qy, qz = q_wxyz[t, jid]
-                rotation = glm.quat(float(qw), float(qx), float(qy), float(qz))
-            bj.Keyframes[t] = Pose(position, rotation)  # type: ignore[index]
+        values = [0.0] * 6
+        for jid in ordered_joint_ids:
+            if jid == root_idx:
+                values.extend(root_xyz[t].tolist())
+            values.extend(local_eulers[t, jid].tolist())
+        bvh_lines.append(" ".join(f"{float(value):.6f}" for value in values))
 
-    container = bvhio.BvhContainer(root_joint, frameCount=T, frameTime=1.0 / float(fps))
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".bvh", delete=False, encoding="utf-8") as f:
-        tmp_path = f.name
-    try:
-        bvhio.writeBvh(tmp_path, container, percision=6)
-        bvh_text = Path(tmp_path).read_text(encoding="utf-8")
-        return _strip_end_site_blocks(bvh_text)
-    finally:
-        try:
-            os.remove(tmp_path)
-        except Exception:
-            pass
+    return "\n".join(bvh_lines) + "\n"
 
 
 def motion_to_bvh_bytes(
