@@ -63,7 +63,7 @@ class ConditionWriters:
         s = self.slice_dict[fname]
         cols = components if components is not None else range(s.stop - s.start)
         cols = torch.tensor([s.start + c for c in cols], device=self.device)
-        self.observed_motion[frame_idx[:, None], cols] = values.reshape(len(frame_idx), -1)
+        self.observed_motion[frame_idx[:, None], cols] = values.reshape(len(frame_idx), len(cols))
         self.motion_mask[frame_idx[:, None], cols] = True
 
     def write_joints(self, fname: str, pair_indices, values) -> None:
